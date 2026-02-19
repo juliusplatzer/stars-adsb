@@ -1,0 +1,26 @@
+{
+  "name": "@vstars/client",
+  "private": true,
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": "./dist/index.js"
+  },
+  "scripts": {
+    "dev": "tsc -p tsconfig.json -w",
+    "build": "tsc -p tsconfig.json",
+    "demo": "pnpm run build && python3 -m http.server 4173 -d .",
+    "tauri:prepare": "pnpm run build && rm -rf .tauri-dist && mkdir -p .tauri-dist/dist .tauri-dist/public .tauri-dist/data && cp index.html .tauri-dist/index.html && cp -R dist/. .tauri-dist/dist/ && cp -R public/. .tauri-dist/public/ && cp -R data/. .tauri-dist/data/",
+    "tauri:dev": "tauri dev",
+    "tauri:build": "tauri build"
+  },
+  "dependencies": {
+    "@vstars/shared": "workspace:*"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^1.6.0",
+    "typescript": "^5.6.3"
+  }
+}
+  
