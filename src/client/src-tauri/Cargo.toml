@@ -1,0 +1,14 @@
+[package]
+name = "stars-adsb-desktop"
+version = "0.1.0"
+description = "Desktop shell for STARS ADS-B client"
+edition = "2021"
+
+[build-dependencies]
+tauri-build = { version = "1.5", features = [] }
+
+[dependencies]
+tauri = { version = "1.6", features = [] }
+
+[features]
+custom-protocol = ["tauri/custom-protocol"]
