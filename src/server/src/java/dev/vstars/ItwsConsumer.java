@@ -14,105 +14,73 @@ import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.time.Instant;
-import java.util.*;
-import java.util.zip.Deflater;
-import java.util.Base64;
+import java.util.Locale;
 
 /**
- * Consumes ITWS Forecast Image Product (productID=9901) from a Solace queue.
+ * ITWS Precipitation TRACON (productID=9850) -> POST http://localhost:8080/api/wx/radar
  *
- * Goal: POST a rolling window of the last 4 "current" grids (past 3 + current)
- * to http://localhost:8080/api/wx/radar (configurable).
+ * Payload format:
+ * {
+ *   "updatedAtMs": ...,
+ *   "source": "SWIM_ITWS",
+ *   "levels": [1,3,4],                 // active levels in newest frame only
+ *   "frames": [
+ *     { "receiverMs":..., "itwsGenTimeMs":..., "grid":{...}, "cellsRle":"lvl,cnt ...", ... },
+ *     { ... }, { ... }, { ... }
+ *   ]
+ * }
  *
- * Payload notes:
- *  - levels are bytes (0..6) in row-major order (row 0 then row 1 ...).
- *  - data is zlib-compressed then base64 encoded: encoding="zlib+base64".
+ * Frames cache: last 4 frames (newest first + 3 history).
  *
- * Geometry included:
- *  - rows, cols, dxM, dyM, rotationDeg, TRP lat/lon
- *  - origin offsets xOffsetM/yOffsetM:
- *      If message doesn't provide explicit offsets, we assume TRP is grid center and set:
- *        xOffsetM = - (cols * dxM)/2
- *        yOffsetM = - (rows * dyM)/2
- *      This makes cell centers:
- *        x = xOffsetM + (c + 0.5)*dxM
- *        y = yOffsetM + (r + 0.5)*dyM
- *      then rotate by rotationDeg around TRP.
+ * Cells are mapped RLE (levels 0..6). Special/no-data => 0.
+ * Geometry needed for plotting is included per frame.
  *
- * Required env:
- *  SCDS_JMS_URL_ITWS
- *  SCDS_VPN_ITWS
- *  SCDS_USERNAME
- *  SCDS_PASSWORD
- *  SCDS_QUEUE_ITWS
- *
- * Optional env:
- *  ITWS_SELECTOR=                  (usually empty)
- *  ITWS_TARGET_PRODUCT_ID=9901
- *  RECEIVE_TIMEOUT_MS=15000
- *  HEARTBEAT_MS=10000
- *  MAX_XML_BYTES=32000000
- *
- *  WX_POST_URL=http://localhost:8080/api/wx/radar (or ITWS_POST_URL)
- *  ITWS_INGEST_TOKEN=...          (sent as X-WX-Token)
- *
- *  HTTP_CONNECT_TIMEOUT_MS=1500
- *  HTTP_REQUEST_TIMEOUT_MS=5000
- *  HTTP_RETRY_SLEEP_MS=250
- *
- *  ACK_ON_EXCEPTION=false          (true will ACK even on exceptions)
+ * Reliability: ACK only after POST returns 2xx.
  */
 public final class ItwsConsumer {
 
-    public static void main(String[] args) throws Exception {
-        final Config cfg = Config.fromEnv();
+    private static final int TARGET_PRODUCT_ID = 9850;
+    private static final int CACHE_N = 4;
 
-        final HttpClient http = HttpClient.newBuilder()
+    public static void main(String[] args) throws Exception {
+        Config cfg = Config.fromEnv();
+
+        HttpClient http = HttpClient.newBuilder()
                 .connectTimeout(Duration.ofMillis(cfg.httpConnectTimeoutMs))
                 .build();
 
-        final SolConnectionFactory cf = SolJmsUtility.createConnectionFactory();
+        SolConnectionFactory cf = SolJmsUtility.createConnectionFactory();
         cf.setHost(normalizeJmsHostList(cfg.jmsUrl));
         cf.setVPN(cfg.vpn);
         cf.setUsername(cfg.username);
         cf.setPassword(cfg.password);
         cf.setConnectRetries(5);
         cf.setConnectRetriesPerHost(3);
-        if (!cfg.clientName.isEmpty()) cf.setClientID(cfg.clientName);
 
-        final XMLInputFactory xif = XMLInputFactory.newFactory();
-        trySet(xif, XMLInputFactory.SUPPORT_DTD, Boolean.FALSE);
-        trySet(xif, "javax.xml.stream.isSupportingExternalEntities", Boolean.FALSE);
+        FrameCache cache = new FrameCache(CACHE_N);
 
-        // rolling buffer of last 4 "current" grids
-        final ArrayDeque<GridSnapshot> ring = new ArrayDeque<>(4);
-        GridGeom lastGeom = null;
+        try (Connection conn = cf.createConnection();
+             Session session = conn.createSession(false, Session.CLIENT_ACKNOWLEDGE)) {
 
-        Connection conn = null;
-        Session session = null;
-        MessageConsumer consumer = null;
-        try {
-            conn = cf.createConnection();
-            session = conn.createSession(false, Session.CLIENT_ACKNOWLEDGE);
-
-            final Queue queue = session.createQueue(cfg.queueName);
-            consumer = (cfg.selector == null || cfg.selector.isBlank())
-                    ? session.createConsumer(queue)
-                    : session.createConsumer(queue, cfg.selector);
+            Queue queue = session.createQueue(cfg.queueName);
+            MessageConsumer consumer = session.createConsumer(queue);
 
             conn.start();
-            System.out.println("Connected. Queue=" + cfg.queueName);
+            System.out.println("Connected. Consuming queue: " + cfg.queueName);
             System.out.println("Posting to: " + cfg.postUrl);
+
+            XMLInputFactory xif = XMLInputFactory.newFactory();
+            trySet(xif, XMLInputFactory.SUPPORT_DTD, false);
+            trySet(xif, "javax.xml.stream.isSupportingExternalEntities", false);
 
             long empty = 0;
             long lastBeat = System.currentTimeMillis();
 
             while (true) {
-                final Message msg = consumer.receive(cfg.receiveTimeoutMs);
-                final long now = System.currentTimeMillis();
-
+                Message msg = consumer.receive(cfg.receiveTimeoutMs);
                 if (msg == null) {
                     empty++;
+                    long now = System.currentTimeMillis();
                     if (now - lastBeat >= cfg.heartbeatMs) {
                         System.out.println("Waiting… (" + empty + " empty polls)");
                         lastBeat = now;
@@ -122,351 +90,311 @@ public final class ItwsConsumer {
 
                 boolean acked = false;
                 try {
-                    // Quick gate by productID property if present
+                    // Cheap gate: skip non-9850 quickly
                     if (msg.propertyExists("productID")) {
-                        int pid = toIntSafe(msg.getObjectProperty("productID"), -1);
-                        if (pid != -1 && pid != cfg.targetProductId) {
+                        int pid = toInt(msg.getObjectProperty("productID"), -1);
+                        if (pid != TARGET_PRODUCT_ID) {
                             msg.acknowledge();
                             acked = true;
                             continue;
                         }
                     }
 
-                    // Parse the CURRENT grid (frame #0) from this message
-                    ParsedCurrent cur = parseCurrentGrid9901(msg, xif, cfg.maxXmlBytes);
+                    // Receiver timestamp for this frame
+                    long receiverMs = System.currentTimeMillis();
 
-                    if (cur == null || cur.geom == null || cur.levels == null || cur.levels.length == 0) {
-                        // malformed => ACK to avoid poison-loop
+                    Frame f = parse9850(msg, xif, cfg.maxXmlBytes, receiverMs);
+                    if (f == null || f.productId != TARGET_PRODUCT_ID || f.cellsRle == null) {
                         msg.acknowledge();
                         acked = true;
                         continue;
                     }
 
-                    // If geometry changes, reset history (safer for plotting)
-                    if (lastGeom != null && !lastGeom.compatibleWith(cur.geom)) {
-                        ring.clear();
-                    }
-                    lastGeom = cur.geom;
+                    // Add to cache (newest first)
+                    cache.push(f);
 
-                    // Add to rolling buffer (dedupe by timestamp ms)
-                    if (!ring.isEmpty() && ring.peekLast().tEpochMs == cur.tEpochMs) {
-                        // same timestamp; ignore duplicate
-                    } else {
-                        ring.addLast(new GridSnapshot(cur.tEpochMs, cur.tIso, cur.maxLevel, cur.geom, cur.levels));
-                        while (ring.size() > 4) ring.removeFirst();
+                    // Build payload using cached frames
+                    byte[] json = buildPayloadJsonBytes(cache);
+
+                    if (cfg.printJson) {
+                        System.out.write(json);
+                        System.out.write('\n');
+                        System.out.flush();
                     }
 
-                    // Only POST once we have at least 1 grid (it’ll grow up to 4)
-                    byte[] json = buildHistoryJson(ring, lastGeom);
                     postWithRetry(http, cfg.postUrl, cfg.ingestToken, json,
                             cfg.httpRequestTimeoutMs, cfg.retrySleepMs);
 
                     System.out.println("POST OK " + Instant.now()
-                            + " frames=" + ring.size()
-                            + " newest=" + ring.peekLast().tIso
-                            + " maxLevelAll=" + maxLevelAll(ring));
+                            + " frames=" + cache.size()
+                            + " newestNonZero=" + f.nonZeroCells
+                            + " newestMaxLvl=" + f.maxLevel
+                            + " newestCells=" + f.cellsTotal
+                            + " newestPlot=" + f.plotCols + "x" + f.plotRows
+                            + " dimsSrc=" + f.dimsSource
+                    );
 
-                    // ACK only after successful POST
                     msg.acknowledge();
                     acked = true;
 
                 } catch (Exception e) {
                     System.err.println("Error: " + e.getMessage());
+                    // No ACK on exception => redelivery (reliability)
                 } finally {
                     if (!acked && cfg.ackOnException) {
                         try { msg.acknowledge(); } catch (Exception ignored) {}
                     }
                 }
             }
-        } finally {
-            closeQuietly(consumer);
-            closeQuietly(session);
-            closeQuietly(conn);
         }
     }
 
-    // ---------------- Data Models ----------------
+    // ---------------- Cache (newest first) ----------------
 
-    private static final class GridGeom {
-        int rows, cols;
-        int dxM, dyM;
-        double rotationDeg;
+    private static final class FrameCache {
+        private final Frame[] buf;
+        private int size = 0;    // <= buf.length
 
-        double trpLatDeg, trpLonDeg;
+        FrameCache(int n) { this.buf = new Frame[n]; }
 
-        // If not provided by message, we fill with centered assumption.
-        int xOffsetM, yOffsetM;
-        String offsetMode; // "from_message" or "centered_on_trp"
-
-        boolean compatibleWith(GridGeom o) {
-            if (o == null) return false;
-            return this.rows == o.rows
-                    && this.cols == o.cols
-                    && this.dxM == o.dxM
-                    && this.dyM == o.dyM
-                    && Math.abs(this.rotationDeg - o.rotationDeg) < 1e-6
-                    && Math.abs(this.trpLatDeg - o.trpLatDeg) < 1e-8
-                    && Math.abs(this.trpLonDeg - o.trpLonDeg) < 1e-8;
+        void push(Frame f) {
+            // shift right by 1 (n is tiny = 4)
+            for (int i = Math.min(size, buf.length - 1); i >= 1; i--) {
+                buf[i] = buf[i - 1];
+            }
+            buf[0] = f;
+            if (size < buf.length) size++;
         }
+
+        int size() { return size; }
+
+        Frame get(int idx) { return buf[idx]; }
     }
 
-    private static final class GridSnapshot {
-        final long tEpochMs;
-        final String tIso;
-        final int maxLevel;
-        final GridGeom geom; // same for all (normally)
-        final byte[] levels; // raw levels (0..6), length rows*cols
+    // ---------------- Parse 9850 (streaming) ----------------
 
-        GridSnapshot(long tEpochMs, String tIso, int maxLevel, GridGeom geom, byte[] levels) {
-            this.tEpochMs = tEpochMs;
-            this.tIso = tIso;
-            this.maxLevel = maxLevel;
-            this.geom = geom;
-            this.levels = levels;
-        }
-    }
-
-    private static final class ParsedCurrent {
-        long tEpochMs;
-        String tIso;
-
-        GridGeom geom;
-        byte[] levels;
-        int maxLevel;
-    }
-
-    // ---------------- Parsing current grid from 9901 ----------------
-
-    private static ParsedCurrent parseCurrentGrid9901(Message msg, XMLInputFactory xif, int maxXmlBytes) throws Exception {
-        InputStream in = extractXmlStream(msg, maxXmlBytes);
+    private static Frame parse9850(Message msg, XMLInputFactory xif, int maxBytes, long receiverMs) throws Exception {
+        InputStream in = extractXmlStream(msg, maxBytes);
         if (in == null) return null;
 
-        XMLStreamReader r = null;
-        try {
-            r = xif.createXMLStreamReader(in, StandardCharsets.UTF_8.name());
+        XMLStreamReader r = xif.createXMLStreamReader(in);
 
-            // message-level meta
-            long genSec = 0L;
-            long genMs = 0L;
-            int spacing = 0; // seconds (assumed)
-            int targetProductId = -1;
-            String productName = "";
-            String site = "";
-            String airport = "";
+        Frame f = new Frame();
+        f.receiverMs = receiverMs;
+        f.receivedAt = Instant.ofEpochMilli(receiverMs).toString();
 
-            int dxM = 0, dyM = 0;
-            double rotationDeg = 0.0;
-            Double trpLat = null, trpLon = null;
+        String current = null;
+        StringBuilder small = null;
 
-            Integer xOffsetM = null, yOffsetM = null; // rarely present in 9901, but support if it is.
+        MappedRleBuilder rle = null;
 
-            // frame 0 meta
-            boolean inFirstImage = false;
-            boolean gotFirstImage = false;
+        while (r.hasNext()) {
+            int ev = r.next();
 
-            Integer mx = null, my = null; // fci_grid_max_x/y (semantics uncertain)
-            Integer maxPrecipLevel = null;
-            String compression = null;
-
-            // decoding state
-            boolean inCompressed = false;
-            RleByteDecoder dec = null;
-
-            String current = null;
-            StringBuilder small = null;
-
-            while (r.hasNext()) {
-                int ev = r.next();
-
-                if (ev == XMLStreamConstants.START_ELEMENT) {
-                    current = r.getLocalName();
-
-                    if ("fci_image".equals(current) && !gotFirstImage) {
-                        inFirstImage = true;
-                        gotFirstImage = true;
-                        small = null;
-                        continue;
-                    }
-
-                    if (inFirstImage && "fci_grid_compressed".equals(current)) {
-                        inCompressed = true;
-
-                        // We'll allocate after we have mx/my. If still missing, allocate later by growing,
-                        // but usually mx/my appear before compressed.
-                        dec = new RleByteDecoder();
-                        small = null;
-                        continue;
-                    }
-
-                    // buffer text for non-payload tags
+            if (ev == XMLStreamConstants.START_ELEMENT) {
+                current = r.getLocalName();
+                if ("prcp_grid_compressed".equals(current)) {
+                    small = null;
+                    if (rle == null) rle = new MappedRleBuilder();
+                    rle.setSpecials(f.badValue, f.noCoverage, f.attenuated, f.apDetected);
+                } else {
                     small = new StringBuilder(64);
+                }
 
-                } else if (ev == XMLStreamConstants.CHARACTERS || ev == XMLStreamConstants.CDATA) {
+            } else if (ev == XMLStreamConstants.CHARACTERS || ev == XMLStreamConstants.CDATA) {
+                if ("prcp_grid_compressed".equals(current)) {
+                    if (rle != null) rle.feed(r.getText());
+                } else if (small != null) {
+                    if (small.length() < 1024) small.append(r.getText());
+                }
 
-                    if (inFirstImage && inCompressed && dec != null) {
-                        dec.feed(r.getText());
-                    } else if (small != null) {
-                        if (small.length() < 4096) small.append(r.getText());
-                    }
+            } else if (ev == XMLStreamConstants.END_ELEMENT) {
+                String end = r.getLocalName();
 
-                } else if (ev == XMLStreamConstants.END_ELEMENT) {
-                    String end = r.getLocalName();
-
-                    // end of compressed payload => finalize decode and stop parsing (we only need current grid)
-                    if (inFirstImage && inCompressed && "fci_grid_compressed".equals(end)) {
-                        inCompressed = false;
-                        dec.finish();
-
-                        // infer geometry sizes
-                        int[] rc = inferRowsCols(mx, my, dec.filled());
-                        int rows = rc[0], cols = rc[1];
-
-                        if (rows <= 0 || cols <= 0) return null;
-                        int total = safeMul(rows, cols);
-                        if (total <= 0) return null;
-
-                        // Get levels array trimmed to filled cells
-                        byte[] levels = dec.takeLevels(total);
-
-                        // Build geom
-                        GridGeom geom = new GridGeom();
-                        geom.rows = rows;
-                        geom.cols = cols;
-                        geom.dxM = dxM;
-                        geom.dyM = dyM;
-                        geom.rotationDeg = rotationDeg;
-                        geom.trpLatDeg = (trpLat != null) ? trpLat : 0.0;
-                        geom.trpLonDeg = (trpLon != null) ? trpLon : 0.0;
-
-                        if (xOffsetM != null && yOffsetM != null) {
-                            geom.xOffsetM = xOffsetM;
-                            geom.yOffsetM = yOffsetM;
-                            geom.offsetMode = "from_message";
-                        } else {
-                            // centered-on-TRP assumption
-                            // origin here is SW-corner offset relative to TRP
-                            geom.xOffsetM = - (int) Math.round((cols * (double) dxM) / 2.0);
-                            geom.yOffsetM = - (int) Math.round((rows * (double) dyM) / 2.0);
-                            geom.offsetMode = "centered_on_trp";
-                        }
-
-                        // Timestamp for "current" grid:
-                        // use generation time as validity time for frame #0.
-                        long tMs = genSec > 0 ? (genSec * 1000L + genMs) : System.currentTimeMillis();
-                        String tIso = Instant.ofEpochMilli(tMs).toString();
-
-                        // compute maxLevel from decoded data (already mapped 0..6)
-                        int maxLevelSeen = dec.maxMappedSeen;
-
-                        ParsedCurrent out = new ParsedCurrent();
-                        out.tEpochMs = tMs;
-                        out.tIso = tIso;
-                        out.geom = geom;
-                        out.levels = levels;
-                        out.maxLevel = maxLevelSeen;
-
-                        // done: current grid extracted
-                        return out;
-                    }
-
-                    if (small != null && current != null && current.equals(end)) {
-                        String v = small.toString().trim();
-
-                        // message-level tags
-                        switch (end) {
-                            case "product_msg_id" -> targetProductId = parseInt(v, -1);
-                            case "product_msg_name" -> productName = v;
-                            case "product_header_site_id", "product_header_itws_sites" -> site = v;
-                            case "product_header_airports" -> airport = v;
-
-                            case "product_header_generation_time_seconds" -> genSec = parseLong(v, 0L);
-                            case "product_header_generation_time_milliseconds" -> genMs = parseLong(v, 0L);
-                            case "fci_spacing" -> spacing = parseInt(v, 0);
-
-                            case "grid_dx" -> dxM = parseInt(v, 0);
-                            case "grid_dy" -> dyM = parseInt(v, 0);
-                            case "grid_rotation" -> rotationDeg = parseDouble(v, 0.0);
-
-                            case "grid_TRP_latitude" -> trpLat = parseDouble(v, null);
-                            case "grid_TRP_longitude" -> trpLon = parseDouble(v, null);
-
-                            // if any offset-like tags appear
-                            case "grid_xoffset", "grid_x_offset", "xOffsetM", "prcp_xoffset" -> xOffsetM = parseInt(v, null);
-                            case "grid_yoffset", "grid_y_offset", "yOffsetM", "prcp_yoffset" -> yOffsetM = parseInt(v, null);
-
-                            default -> { /* ignore */ }
-                        }
-
-                        // frame 0 tags
-                        if (inFirstImage) {
-                            switch (end) {
-                                case "fci_grid_max_x" -> mx = parseInt(v, null);
-                                case "fci_grid_max_y" -> my = parseInt(v, null);
-                                case "fci_grid_max_precip_level" -> maxPrecipLevel = parseInt(v, null);
-                                case "fci_grid_compression_encoding_scheme" -> compression = v;
-                                default -> { /* ignore */ }
-                            }
-                        }
-                    }
-
-                    if ("fci_image".equals(end) && inFirstImage) {
-                        // We expected to return from end-of-compressed; if no compressed found, leave.
-                        inFirstImage = false;
-                    }
-
+                if ("prcp_grid_compressed".equals(end)) {
+                    if (rle != null) rle.finish();
                     current = null;
                     small = null;
+                    continue;
                 }
+
+                if (small != null && current != null && current.equals(end)) {
+                    String v = small.toString().trim();
+                    applyField(f, end, v);
+                    if (rle != null) rle.setSpecials(f.badValue, f.noCoverage, f.attenuated, f.apDetected);
+                }
+
+                current = null;
+                small = null;
             }
-
-            return null;
-
-        } finally {
-            if (r != null) try { r.close(); } catch (Exception ignored) {}
-            try { in.close(); } catch (Exception ignored) {}
         }
+
+        if (rle == null) return null;
+
+        f.cellsRle = rle.outString();
+        f.cellsTotal = rle.totalCells();
+        f.maxLevel = rle.maxLevel();
+        f.nonZeroCells = rle.nonZeroCells();
+        f.activeMask = rle.activeMask();
+
+        f.noCoverageCells = rle.noCoverageCells();
+        f.badCells = rle.badCells();
+        f.apCells = rle.apCells();
+        f.attenCells = rle.attenCells();
+
+        // must be our product
+        if (f.productId != TARGET_PRODUCT_ID) return null;
+
+        // choose plotting dims robustly
+        finalizePlotDims(f);
+
+        if (f.plotRows <= 0 || f.plotCols <= 0) {
+            System.err.println("WARN: cannot determine plot dims (cellsTotal=" + f.cellsTotal
+                    + " nrows=" + f.rows + " ncols=" + f.cols
+                    + " gridMaxY=" + f.gridMaxY + " gridMaxX=" + f.gridMaxX + ")");
+            return null;
+        }
+
+        long expected = (long) f.plotRows * (long) f.plotCols;
+        if (f.cellsTotal > 0 && expected > 0 && f.cellsTotal != expected) {
+            System.err.println("WARN: cellsTotal=" + f.cellsTotal
+                    + " but plotRows*plotCols=" + expected
+                    + " (dimsSource=" + f.dimsSource
+                    + ", nrows*ncols=" + ((long)f.rows * (long)f.cols)
+                    + ", gridMaxY*gridMaxX=" + ((long)f.gridMaxY * (long)f.gridMaxX)
+                    + ")");
+        }
+
+        return f;
     }
 
     /**
-     * Infer rows/cols from XML mx/my and actual filled cell count.
-     * mx/my in 9901 may be "count" or "max index"; we resolve by matching filledCells.
+     * Decide the authoritative dimensions to reshape row-major cells.
+     * Priority:
+     *  1) gridMaxX/gridMaxY if present AND matches cellsTotal (or cellsTotal==0)
+     *  2) ncols/nrows if matches
+     *  3) infer square if cellsTotal is perfect square
+     *  4) best-effort fallback with a warning downstream
      */
-    private static int[] inferRowsCols(Integer mx, Integer my, int filledCells) {
-        if (filledCells <= 0) return new int[]{-1, -1};
+    private static void finalizePlotDims(Frame f) {
+        long cells = f.cellsTotal;
 
-        // Candidate sets (value, value+1)
-        int[] xs = (mx != null && mx > 0) ? new int[]{mx, mx + 1} : new int[]{};
-        int[] ys = (my != null && my > 0) ? new int[]{my, my + 1} : new int[]{};
+        int gx = f.gridMaxX;
+        int gy = f.gridMaxY;
+        int nr = f.rows;
+        int nc = f.cols;
 
-        if (xs.length > 0 && ys.length > 0) {
-            for (int r : ys) for (int c : xs) {
-                long prod = (long) r * (long) c;
-                if (prod == (long) filledCells) return new int[]{r, c};
+        // helper: matches cells count (if known)
+        // (cellsTotal should be known for real frames; but keep robust)
+        if (gx > 0 && gy > 0) {
+            long e = (long) gx * (long) gy;
+            if (cells == 0 || cells == e) {
+                f.plotCols = gx;
+                f.plotRows = gy;
+                f.dimsSource = "gridMax";
+                return;
             }
         }
 
-        // fallback: square root if perfect square
-        int s = (int) Math.round(Math.sqrt(filledCells));
-        if ((long) s * (long) s == (long) filledCells) return new int[]{s, s};
+        if (nc > 0 && nr > 0) {
+            long e = (long) nc * (long) nr;
+            if (cells == 0 || cells == e) {
+                f.plotCols = nc;
+                f.plotRows = nr;
+                f.dimsSource = "nrows_ncols";
+                return;
+            }
+        }
 
-        // last resort: treat as 1 x N
-        return new int[]{1, filledCells};
+        if (cells > 0) {
+            int s = (int) Math.round(Math.sqrt((double) cells));
+            if ((long) s * (long) s == cells) {
+                f.plotCols = s;
+                f.plotRows = s;
+                f.dimsSource = "inferredSquare";
+                return;
+            }
+        }
+
+        // fallback preference: still prefer gridMax if present, else nrows/ncols
+        if (gx > 0 && gy > 0) {
+            f.plotCols = gx;
+            f.plotRows = gy;
+            f.dimsSource = "gridMax_mismatch";
+        } else {
+            f.plotCols = nc;
+            f.plotRows = nr;
+            f.dimsSource = "nrows_ncols_mismatch";
+        }
     }
 
-    // ---------------- RLE decoder producing mapped byte levels ----------------
+    private static void applyField(Frame f, String tag, String v) {
+        switch (tag) {
+            // identity
+            case "product_msg_id" -> f.productId = parseInt(v, -1);
+            case "product_msg_name" -> f.productName = v;
+            case "product_header_itws_sites" -> f.site = v;
+            case "product_header_airports" -> f.airport = v;
 
-    private static final class RleByteDecoder {
-        // Store decoded levels in a growable byte[].
-        // We grow conservatively; final trimming happens before POST.
-        private byte[] out = new byte[1 << 20]; // 1MB initial
-        private int pos = 0;
+            // ITWS times (recommended)
+            case "product_header_generation_time_seconds" -> f.genSec = parseLong(v, 0);
+            case "product_header_generation_time_milliseconds" -> f.genMs = parseInt(v, 0);
+            case "product_header_expiration_time_seconds" -> f.expSec = parseLong(v, 0);
+            case "product_header_expiration_time_milliseconds" -> f.expMs = parseInt(v, 0);
 
-        // specials (ITWS uses these codes frequently)
+            // geometry/grid
+            case "prcp_TRP_latitude" -> f.trpLatMicroDeg = parseInt(v, 0);
+            case "prcp_TRP_longitude" -> f.trpLonMicroDeg = parseInt(v, 0);
+
+            case "prcp_xoffset" -> f.xOffsetM = parseInt(v, 0);
+            case "prcp_yoffset" -> f.yOffsetM = parseInt(v, 0);
+
+            case "prcp_dx" -> f.dxM = parseInt(v, 0);
+            case "prcp_dy" -> f.dyM = parseInt(v, 0);
+
+            case "prcp_rotation" -> f.rotationMilliDeg = parseInt(v, 0);
+
+            case "prcp_nrows" -> f.rows = parseInt(v, -1);
+            case "prcp_ncols" -> f.cols = parseInt(v, -1);
+
+            // IMPORTANT: authoritative grid bounds (often match the compressed cells)
+            case "prcp_grid_max_x" -> f.gridMaxX = parseInt(v, -1);
+            case "prcp_grid_max_y" -> f.gridMaxY = parseInt(v, -1);
+
+            // special codes
+            case "prcp_attenuated" -> f.attenuated = parseInt(v, 7);
+            case "prcp_ap_detected" -> f.apDetected = parseInt(v, 8);
+            case "prcp_bad_value" -> f.badValue = parseInt(v, 9);
+            case "prcp_no_coverage" -> f.noCoverage = parseInt(v, 15);
+
+            // misc
+            case "prcp_grid_compression_encoding_scheme" -> f.compression = v;
+            case "prcp_grid_max_precip_level" -> f.maxPrecipLevel = parseInt(v, -1);
+
+            default -> { /* ignore */ }
+        }
+
+        if (f.genSec > 0) f.itwsGenTimeMs = f.genSec * 1000L + Math.max(0, f.genMs);
+        if (f.expSec > 0) f.itwsExpTimeMs = f.expSec * 1000L + Math.max(0, f.expMs);
+    }
+
+    // ---------------- RLE: ITWS "val,cnt" -> mapped "lvl,cnt" ----------------
+
+    private static final class MappedRleBuilder {
+        private final StringBuilder out = new StringBuilder(1 << 16);
+
         private int bad = 9, noCov = 15, atten = 7, ap = 8;
 
-        int maxMappedSeen = 0;
+        private long totalCells = 0;
+        private int maxLevel = 0;
+        private long nonZero = 0;
 
-        // streaming parse state
+        private long noCovCells = 0, badCells = 0, apCells = 0, attenCells = 0;
+
+        // which mapped levels (1..6) occur in this frame
+        private int activeMask = 0; // bit i means level i active
+
+        // parser state
         private int curVal = 0;
         private int curCnt = 0;
         private boolean neg = false;
@@ -474,17 +402,9 @@ public final class ItwsConsumer {
         private boolean inCnt = false;
         private boolean sawDigit = false;
 
-        int filled() { return pos; }
-
-        byte[] takeLevels(int exactLen) {
-            // exactLen is rows*cols inferred.
-            // If pos < exactLen, pad remaining with 0; if pos > exactLen, truncate.
-            byte[] trimmed = new byte[exactLen];
-            int copy = Math.min(exactLen, pos);
-            System.arraycopy(out, 0, trimmed, 0, copy);
-            // remaining bytes already 0
-            return trimmed;
-        }
+        // merge state
+        private int lastLevel = -1;
+        private int lastCount = 0;
 
         void setSpecials(int bad, int noCov, int atten, int ap) {
             this.bad = bad;
@@ -495,8 +415,8 @@ public final class ItwsConsumer {
 
         void feed(String chunk) {
             if (chunk == null || chunk.isEmpty()) return;
-
             final int n = chunk.length();
+
             for (int i = 0; i < n; i++) {
                 char c = chunk.charAt(i);
 
@@ -548,25 +468,49 @@ public final class ItwsConsumer {
 
         void finish() {
             if (inCnt && sawDigit) emitRun(curVal, curCnt);
-            inVal = false;
-            inCnt = false;
-            sawDigit = false;
+            flushLast();
+            inVal = false; inCnt = false; sawDigit = false;
         }
 
-        private void emitRun(int rawVal, int cnt) {
+        private void emitRun(int originalVal, int cnt) {
             if (cnt <= 0) return;
 
-            final int lvl = mapLevel(rawVal);
+            // count specials before mapping
+            if (originalVal == noCov) noCovCells += cnt;
+            else if (originalVal == bad) badCells += cnt;
+            else if (originalVal == ap) apCells += cnt;
+            else if (originalVal == atten) attenCells += cnt;
 
-            // update max mapped
-            if (lvl > maxMappedSeen) maxMappedSeen = lvl;
+            int level = mapLevel(originalVal);
 
-            // ensure capacity
-            ensureCapacity(pos + cnt);
+            totalCells += (long) cnt;
+            if (level > 0) {
+                nonZero += (long) cnt;
+                activeMask |= (1 << level);
+            }
+            if (level > maxLevel) maxLevel = level;
 
-            // fast fill
-            Arrays.fill(out, pos, pos + cnt, (byte) lvl);
-            pos += cnt;
+            // merge consecutive same levels
+            if (level == lastLevel) {
+                long sum = (long) lastCount + (long) cnt;
+                if (sum > Integer.MAX_VALUE) {
+                    flushLast();
+                    lastLevel = level;
+                    lastCount = cnt;
+                } else {
+                    lastCount += cnt;
+                }
+            } else {
+                flushLast();
+                lastLevel = level;
+                lastCount = cnt;
+            }
+        }
+
+        private void flushLast() {
+            if (lastLevel < 0 || lastCount <= 0) return;
+            if (!out.isEmpty()) out.append(' ');
+            out.append(lastLevel).append(',').append(lastCount);
         }
 
         private int mapLevel(int v) {
@@ -575,156 +519,158 @@ public final class ItwsConsumer {
             return v;
         }
 
-        private void ensureCapacity(int needed) {
-            if (needed <= out.length) return;
-            int cap = out.length;
-            while (cap < needed) {
-                // grow ~1.5x to reduce RAM spikes but keep realloc count low
-                cap = cap + (cap >> 1);
-                if (cap < 0) { cap = needed; break; }
-            }
-            out = Arrays.copyOf(out, cap);
-        }
+        String outString() { return out.toString(); }
+        long totalCells() { return totalCells; }
+        int maxLevel() { return maxLevel; }
+        long nonZeroCells() { return nonZero; }
+        int activeMask() { return activeMask; }
+
+        long noCoverageCells() { return noCovCells; }
+        long badCells() { return badCells; }
+        long apCells() { return apCells; }
+        long attenCells() { return attenCells; }
 
         private static boolean isDigit(char c) { return c >= '0' && c <= '9'; }
         private static boolean isWs(char c) { return c == ' ' || c == '\n' || c == '\r' || c == '\t'; }
     }
 
-    // ---------------- JSON build (compressed levels) ----------------
+    // ---------------- JSON build: {levels:[..], frames:[..]} ----------------
 
-    private static byte[] buildHistoryJson(ArrayDeque<GridSnapshot> ring, GridGeom geom) throws IOException {
-        // Compress each frame levels on-demand; these grids are large so avoid building huge strings.
-        ByteArrayOutputStream baos = new ByteArrayOutputStream(1 << 20);
-        OutputStreamWriter osw = new OutputStreamWriter(baos, StandardCharsets.UTF_8);
-        BufferedWriter w = new BufferedWriter(osw, 1 << 16);
+    private static byte[] buildPayloadJsonBytes(FrameCache cache) {
+        // active levels in newest frame (cache[0])
+        int activeMask = (cache.size() > 0) ? cache.get(0).activeMask : 0;
 
-        int[] levels = observedWxLevels(ring);
+        StringBuilder sb = new StringBuilder(1 << 18);
+        sb.append('{');
 
-        w.write('{');
-        jstr(w, "schema", "itws-radar-history/v1"); w.write(',');
-        jstr(w, "layout", "row-major"); w.write(',');
-        jstr(w, "levelsEncoding", "u8"); w.write(',');
-        jstr(w, "dataEncoding", "zlib+base64"); w.write(',');
-        jintArray(w, "levels", levels); w.write(',');
+        kvNum(sb, "updatedAtMs", System.currentTimeMillis()); sb.append(',');
+        kvStr(sb, "source", "SWIM_ITWS"); sb.append(',');
 
-        // geometry
-        w.write("\"grid\":{");
-        jint(w, "rows", geom.rows); w.write(',');
-        jint(w, "cols", geom.cols); w.write(',');
-        jint(w, "dxM", geom.dxM); w.write(',');
-        jint(w, "dyM", geom.dyM); w.write(',');
-        jnum(w, "rotationDeg", geom.rotationDeg); w.write(',');
-
-        w.write("\"trp\":{");
-        jnum(w, "latDeg", geom.trpLatDeg); w.write(',');
-        jnum(w, "lonDeg", geom.trpLonDeg);
-        w.write("},");
-
-        w.write("\"origin\":{");
-        jint(w, "xOffsetM", geom.xOffsetM); w.write(',');
-        jint(w, "yOffsetM", geom.yOffsetM); w.write(',');
-        jstr(w, "mode", geom.offsetMode);
-        w.write("}");
-
-        w.write("},");
-
-        // frames
-        w.write("\"frames\":[");
+        // top-level levels array: only levels 1..6 that occur in newest frame
+        sb.append("\"levels\":[");
         boolean first = true;
-        for (GridSnapshot f : ring) {
-            if (!first) w.write(',');
-            first = false;
-
-            // compress levels -> base64
-            byte[] compressed = zlibCompress(f.levels);
-            String b64 = Base64.getEncoder().encodeToString(compressed);
-
-            w.write('{');
-            jstr(w, "t", f.tIso); w.write(',');
-            jlong(w, "tEpochMs", f.tEpochMs); w.write(',');
-            jint(w, "maxLevel", f.maxLevel); w.write(',');
-            jint(w, "rawBytes", f.levels.length); w.write(',');
-            jint(w, "zlibBytes", compressed.length); w.write(',');
-            jstr(w, "data", b64);
-            w.write('}');
-        }
-        w.write(']');
-
-        w.write('}');
-        w.flush();
-        return baos.toByteArray();
-    }
-
-    private static int maxLevelAll(ArrayDeque<GridSnapshot> ring) {
-        int m = 0;
-        for (GridSnapshot s : ring) if (s.maxLevel > m) m = s.maxLevel;
-        return m;
-    }
-
-    private static int[] observedWxLevels(ArrayDeque<GridSnapshot> ring) {
-        GridSnapshot latest = ring.peekLast();
-        if (latest == null || latest.levels == null || latest.levels.length == 0) {
-            return new int[0];
-        }
-
-        boolean[] seen = new boolean[7]; // indices 1..6 used
-        for (byte raw : latest.levels) {
-            int level = raw & 0xFF;
-            if (level >= 1 && level <= 6) {
-                seen[level] = true;
+        for (int lvl = 1; lvl <= 6; lvl++) {
+            if ((activeMask & (1 << lvl)) != 0) {
+                if (!first) sb.append(',');
+                sb.append(lvl);
+                first = false;
             }
         }
+        sb.append("],");
 
-        int count = 0;
-        for (int level = 1; level <= 6; level += 1) {
-            if (seen[level]) {
-                count += 1;
+        sb.append("\"frames\":[");
+        for (int i = 0; i < cache.size(); i++) {
+            if (i > 0) sb.append(',');
+            appendFrameJson(sb, cache.get(i));
+        }
+        sb.append("]");
+
+        sb.append('}');
+        return sb.toString().getBytes(StandardCharsets.UTF_8);
+    }
+
+    private static void appendFrameJson(StringBuilder sb, Frame f) {
+        double trpLatDeg = f.trpLatMicroDeg / 1_000_000.0;
+        double trpLonDeg = f.trpLonMicroDeg / 1_000_000.0;
+        double rotDeg = f.rotationMilliDeg / 1000.0;
+
+        sb.append('{');
+
+        kvNum(sb, "receiverMs", f.receiverMs); sb.append(',');
+        kvStr(sb, "receivedAt", nz(f.receivedAt)); sb.append(',');
+
+        kvNum(sb, "itwsGenTimeMs", f.itwsGenTimeMs); sb.append(',');
+        kvNum(sb, "itwsExpTimeMs", f.itwsExpTimeMs); sb.append(',');
+
+        kvNum(sb, "productId", f.productId); sb.append(',');
+        kvStr(sb, "productName", nz(f.productName)); sb.append(',');
+        kvStr(sb, "site", nz(f.site)); sb.append(',');
+        kvStr(sb, "airport", nz(f.airport)); sb.append(',');
+
+        sb.append("\"grid\":{");
+
+        // publish chosen plotting dims
+        kvNum(sb, "rows", f.plotRows); sb.append(',');
+        kvNum(sb, "cols", f.plotCols); sb.append(',');
+        kvStr(sb, "dimsSource", nz(f.dimsSource)); sb.append(',');
+
+        // publish raw dims for debugging / future decisions
+        sb.append("\"rawDims\":{");
+        kvNum(sb, "nrows", f.rows); sb.append(',');
+        kvNum(sb, "ncols", f.cols); sb.append(',');
+        kvNum(sb, "gridMaxY", f.gridMaxY); sb.append(',');
+        kvNum(sb, "gridMaxX", f.gridMaxX);
+        sb.append("},");
+
+        kvStr(sb, "layout", "row-major"); sb.append(',');
+
+        sb.append("\"trp\":{");
+        kvNumD(sb, "latDeg", trpLatDeg); sb.append(',');
+        kvNumD(sb, "lonDeg", trpLonDeg);
+        sb.append("},");
+
+        sb.append("\"geom\":{");
+        kvNum(sb, "xOffsetM", f.xOffsetM); sb.append(',');
+        kvNum(sb, "yOffsetM", f.yOffsetM); sb.append(',');
+        kvNum(sb, "dxM", f.dxM); sb.append(',');
+        kvNum(sb, "dyM", f.dyM); sb.append(',');
+        kvNumD(sb, "rotationDeg", rotDeg);
+        sb.append("},");
+
+        kvStr(sb, "cellsEncoding", "rle"); sb.append(',');
+        kvStr(sb, "cellsRle", f.cellsRle == null ? "" : f.cellsRle); sb.append(',');
+
+        kvNum(sb, "cellsTotal", f.cellsTotal); sb.append(',');
+        kvNum(sb, "maxLevel", f.maxLevel); sb.append(',');
+        kvNum(sb, "nonZeroCells", f.nonZeroCells); sb.append(',');
+        kvNum(sb, "itwsMaxPrecipLevel", f.maxPrecipLevel); sb.append(',');
+
+        sb.append("\"special\":{");
+        kvNum(sb, "noCoverageCells", f.noCoverageCells); sb.append(',');
+        kvNum(sb, "badCells", f.badCells); sb.append(',');
+        kvNum(sb, "apCells", f.apCells); sb.append(',');
+        kvNum(sb, "attenCells", f.attenCells);
+        sb.append("}");
+
+        sb.append("}"); // grid
+        sb.append('}');
+    }
+
+    private static void kvStr(StringBuilder sb, String k, String v) {
+        sb.append('"').append(esc(k)).append('"').append(':')
+          .append('"').append(esc(v)).append('"');
+    }
+
+    private static void kvNum(StringBuilder sb, String k, long v) {
+        sb.append('"').append(esc(k)).append('"').append(':').append(v);
+    }
+
+    private static void kvNum(StringBuilder sb, String k, int v) {
+        sb.append('"').append(esc(k)).append('"').append(':').append(v);
+    }
+
+    private static void kvNumD(StringBuilder sb, String k, double v) {
+        sb.append('"').append(esc(k)).append('"').append(':').append(Double.toString(v));
+    }
+
+    private static String esc(String s) {
+        if (s == null) return "";
+        StringBuilder out = new StringBuilder(s.length() + 8);
+        for (int i = 0; i < s.length(); i++) {
+            char c = s.charAt(i);
+            switch (c) {
+                case '\\' -> out.append("\\\\");
+                case '"' -> out.append("\\\"");
+                case '\n' -> out.append("\\n");
+                case '\r' -> out.append("\\r");
+                case '\t' -> out.append("\\t");
+                default -> out.append(c);
             }
         }
-
-        int[] out = new int[count];
-        int at = 0;
-        for (int level = 1; level <= 6; level += 1) {
-            if (seen[level]) {
-                out[at++] = level;
-            }
-        }
-        return out;
+        return out.toString();
     }
 
-    private static void closeQuietly(MessageConsumer c) {
-        if (c == null) return;
-        try { c.close(); } catch (Exception ignored) {}
-    }
-
-    private static void closeQuietly(Session s) {
-        if (s == null) return;
-        try { s.close(); } catch (Exception ignored) {}
-    }
-
-    private static void closeQuietly(Connection c) {
-        if (c == null) return;
-        try { c.close(); } catch (Exception ignored) {}
-    }
-
-    private static byte[] zlibCompress(byte[] raw) throws IOException {
-        Deflater def = new Deflater(Deflater.BEST_SPEED);
-        try {
-            def.setInput(raw);
-            def.finish();
-
-            byte[] buf = new byte[1 << 16];
-            ByteArrayOutputStream baos = new ByteArrayOutputStream(Math.max(1024, raw.length / 8));
-
-            while (!def.finished()) {
-                int n = def.deflate(buf);
-                if (n > 0) baos.write(buf, 0, n);
-            }
-            return baos.toByteArray();
-        } finally {
-            def.end();
-        }
-    }
+    private static String nz(String s) { return (s == null) ? "" : s; }
 
     // ---------------- POST with retry ----------------
 
@@ -738,16 +684,14 @@ public final class ItwsConsumer {
     ) throws InterruptedException {
         while (true) {
             try {
-                HttpRequest.Builder b = HttpRequest.newBuilder(url)
+                HttpRequest req = HttpRequest.newBuilder(url)
                         .timeout(Duration.ofMillis(requestTimeoutMs))
                         .header("Content-Type", "application/json")
-                        .POST(HttpRequest.BodyPublishers.ofByteArray(json));
+                        .header("X-WX-Token", token)   // <- ITWS_INGEST_TOKEN
+                        .POST(HttpRequest.BodyPublishers.ofByteArray(json))
+                        .build();
 
-                if (token != null && !token.isBlank()) {
-                    b.header("X-WX-Token", token);
-                }
-
-                HttpResponse<String> resp = http.send(b.build(), HttpResponse.BodyHandlers.ofString());
+                HttpResponse<String> resp = http.send(req, HttpResponse.BodyHandlers.ofString());
                 int code = resp.statusCode();
                 if (code >= 200 && code < 300) return;
 
@@ -760,58 +704,7 @@ public final class ItwsConsumer {
         }
     }
 
-    // ---------------- JSON helpers (no deps) ----------------
-
-    private static void jstr(Writer w, String k, String v) throws IOException {
-        w.write('\"'); w.write(esc(k)); w.write('\"'); w.write(':');
-        w.write('\"'); w.write(esc(v)); w.write('\"');
-    }
-
-    private static void jint(Writer w, String k, int v) throws IOException {
-        w.write('\"'); w.write(esc(k)); w.write('\"'); w.write(':');
-        w.write(Integer.toString(v));
-    }
-
-    private static void jlong(Writer w, String k, long v) throws IOException {
-        w.write('\"'); w.write(esc(k)); w.write('\"'); w.write(':');
-        w.write(Long.toString(v));
-    }
-
-    private static void jnum(Writer w, String k, double v) throws IOException {
-        w.write('\"'); w.write(esc(k)); w.write('\"'); w.write(':');
-        w.write(Double.toString(v));
-    }
-
-    private static void jintArray(Writer w, String k, int[] values) throws IOException {
-        w.write('\"'); w.write(esc(k)); w.write('\"'); w.write(':');
-        w.write('[');
-        for (int i = 0; i < values.length; i += 1) {
-            if (i > 0) {
-                w.write(',');
-            }
-            w.write(Integer.toString(values[i]));
-        }
-        w.write(']');
-    }
-
-    private static String esc(String s) {
-        if (s == null) return "";
-        StringBuilder sb = new StringBuilder(s.length() + 8);
-        for (int i = 0; i < s.length(); i++) {
-            char c = s.charAt(i);
-            switch (c) {
-                case '\\' -> sb.append("\\\\");
-                case '"' -> sb.append("\\\"");
-                case '\n' -> sb.append("\\n");
-                case '\r' -> sb.append("\\r");
-                case '\t' -> sb.append("\\t");
-                default -> sb.append(c);
-            }
-        }
-        return sb.toString();
-    }
-
-    // ---------------- JMS payload extraction ----------------
+    // ---------------- JMS/XML helpers ----------------
 
     private static InputStream extractXmlStream(Message msg, int maxBytes) throws JMSException {
         if (msg instanceof TextMessage tm) {
@@ -821,11 +714,10 @@ public final class ItwsConsumer {
             return new ByteArrayInputStream(s.getBytes(StandardCharsets.UTF_8));
         }
         if (msg instanceof BytesMessage bm) {
-            bm.reset();
             long len = bm.getBodyLength();
             int take = (int) Math.min(len, (long) maxBytes);
-            byte[] out = new byte[Math.max(0, take)];
-            if (take > 0) bm.readBytes(out);
+            byte[] out = new byte[take];
+            bm.readBytes(out);
             return new ByteArrayInputStream(out);
         }
         return null;
@@ -835,20 +727,13 @@ public final class ItwsConsumer {
         try { f.setProperty(prop, value); } catch (Exception ignored) {}
     }
 
-    // ---------------- Parsing helpers ----------------
-
-    private static Integer parseInt(String s, Integer def) {
+    private static int parseInt(String s, int def) {
         if (s == null || s.isBlank()) return def;
         try {
             int dot = s.indexOf('.');
             String t = (dot >= 0) ? s.substring(0, dot) : s;
             return Integer.parseInt(t.trim());
         } catch (Exception e) { return def; }
-    }
-
-    private static int parseInt(String s, int def) {
-        Integer v = parseInt(s, (Integer) null);
-        return v == null ? def : v;
     }
 
     private static long parseLong(String s, long def) {
@@ -860,30 +745,11 @@ public final class ItwsConsumer {
         } catch (Exception e) { return def; }
     }
 
-    private static Double parseDouble(String s, Double def) {
-        if (s == null || s.isBlank()) return def;
-        try { return Double.parseDouble(s.trim()); } catch (Exception e) { return def; }
-    }
-
-    private static double parseDouble(String s, double def) {
-        Double v = parseDouble(s, (Double) null);
-        return v == null ? def : v;
-    }
-
-    private static int toIntSafe(Object o, int def) {
+    private static int toInt(Object o, int def) {
         if (o == null) return def;
         if (o instanceof Number n) return n.intValue();
         try { return Integer.parseInt(String.valueOf(o).trim()); } catch (Exception e) { return def; }
     }
-
-    private static int safeMul(int a, int b) {
-        long x = (long) a * (long) b;
-        if (x <= 0) return 0;
-        if (x > Integer.MAX_VALUE) return Integer.MAX_VALUE;
-        return (int) x;
-    }
-
-    // ---------------- Host normalization (tcps -> smfs) ----------------
 
     private static String normalizeJmsHostList(String raw) {
         if (raw == null) return "";
@@ -902,8 +768,7 @@ public final class ItwsConsumer {
 
                 if (scheme.equals("tcps")) normalized = "smfs://" + hostPort;
                 else if (scheme.equals("tcp")) normalized = "smf://" + hostPort;
-                else if (scheme.equals("smfs") || scheme.equals("smf")) normalized = scheme + "://" + hostPort;
-                else normalized = token;
+                else normalized = scheme + "://" + hostPort;
             } else {
                 while (token.endsWith("/")) token = token.substring(0, token.length() - 1);
                 normalized = token;
@@ -915,56 +780,108 @@ public final class ItwsConsumer {
         return out.isEmpty() ? raw.trim() : out.toString();
     }
 
+    // ---------------- Data model ----------------
+
+    private static final class Frame {
+        // receive time
+        long receiverMs = 0;
+        String receivedAt = "";
+
+        // identity
+        int productId = -1;
+        String productName = "";
+        String site = "";
+        String airport = "";
+
+        // ITWS times
+        long genSec = 0;
+        int genMs = 0;
+        long expSec = 0;
+        int expMs = 0;
+        long itwsGenTimeMs = 0;
+        long itwsExpTimeMs = 0;
+
+        // geometry
+        int trpLatMicroDeg = 0;
+        int trpLonMicroDeg = 0;
+
+        int xOffsetM = 0;
+        int yOffsetM = 0;
+        int dxM = 0;
+        int dyM = 0;
+        int rotationMilliDeg = 0;
+
+        // raw dims
+        int rows = -1; // prcp_nrows
+        int cols = -1; // prcp_ncols
+        int gridMaxX = -1; // prcp_grid_max_x
+        int gridMaxY = -1; // prcp_grid_max_y
+
+        // chosen plotting dims
+        int plotRows = -1;
+        int plotCols = -1;
+        String dimsSource = "";
+
+        // specials
+        int attenuated = 7;
+        int apDetected = 8;
+        int badValue = 9;
+        int noCoverage = 15;
+
+        // misc
+        String compression = "";
+        int maxPrecipLevel = -1;
+
+        // cells (mapped)
+        String cellsRle = "";
+        long cellsTotal = 0;
+        int maxLevel = 0;
+        long nonZeroCells = 0;
+        int activeMask = 0;
+
+        // original-special counts
+        long noCoverageCells = 0;
+        long badCells = 0;
+        long apCells = 0;
+        long attenCells = 0;
+    }
+
     // ---------------- Config ----------------
 
     private static final class Config {
-        final String jmsUrl, vpn, username, password, queueName, clientName;
-        final String selector;
-
-        final int targetProductId;
-        final int receiveTimeoutMs;
-        final int heartbeatMs;
-        final int maxXmlBytes;
+        final String jmsUrl, vpn, username, password, queueName;
 
         final URI postUrl;
         final String ingestToken;
 
-        final int httpConnectTimeoutMs;
-        final int httpRequestTimeoutMs;
-        final int retrySleepMs;
+        final int receiveTimeoutMs, heartbeatMs;
+        final int maxXmlBytes;
+
+        final boolean printJson;
+        final int httpConnectTimeoutMs, httpRequestTimeoutMs, retrySleepMs;
 
         final boolean ackOnException;
 
-        private Config(
-                String jmsUrl, String vpn, String username, String password, String queueName, String clientName,
-                String selector,
-                int targetProductId,
-                int receiveTimeoutMs,
-                int heartbeatMs,
-                int maxXmlBytes,
-                URI postUrl,
-                String ingestToken,
-                int httpConnectTimeoutMs,
-                int httpRequestTimeoutMs,
-                int retrySleepMs,
-                boolean ackOnException
-        ) {
+        private Config(String jmsUrl, String vpn, String username, String password, String queueName,
+                       URI postUrl, String ingestToken,
+                       int receiveTimeoutMs, int heartbeatMs, int maxXmlBytes,
+                       boolean printJson,
+                       int httpConnectTimeoutMs, int httpRequestTimeoutMs, int retrySleepMs,
+                       boolean ackOnException) {
             this.jmsUrl = jmsUrl;
             this.vpn = vpn;
             this.username = username;
             this.password = password;
             this.queueName = queueName;
-            this.clientName = clientName;
-            this.selector = selector;
-
-            this.targetProductId = targetProductId;
-            this.receiveTimeoutMs = receiveTimeoutMs;
-            this.heartbeatMs = heartbeatMs;
-            this.maxXmlBytes = maxXmlBytes;
 
             this.postUrl = postUrl;
             this.ingestToken = ingestToken;
 
+            this.receiveTimeoutMs = receiveTimeoutMs;
+            this.heartbeatMs = heartbeatMs;
+            this.maxXmlBytes = maxXmlBytes;
+
+            this.printJson = printJson;
             this.httpConnectTimeoutMs = httpConnectTimeoutMs;
             this.httpRequestTimeoutMs = httpRequestTimeoutMs;
             this.retrySleepMs = retrySleepMs;
@@ -975,74 +892,50 @@ public final class ItwsConsumer {
         static Config fromEnv() {
             String url = must("SCDS_JMS_URL_ITWS");
             String vpn = must("SCDS_VPN_ITWS");
-            String user = mustFirst("SCDS_USERNAME", "JMS_USER", "USERNAME");
-            String pass = mustFirst("SCDS_PASSWORD", "JMS_PASS", "PASSWORD");
+            String user = must("SCDS_USERNAME");
+            String pass = must("SCDS_PASSWORD");
             String q = must("SCDS_QUEUE_ITWS");
 
-            String client = envOr("SWIM_CLIENT_NAME", "");
-            String selector = envOr("ITWS_SELECTOR", "");
+            // Required token for your API
+            String token = must("ITWS_INGEST_TOKEN");
 
-            int target = intEnvOr("ITWS_TARGET_PRODUCT_ID", 9901);
-            int rto = intEnvOr("RECEIVE_TIMEOUT_MS", 15_000);
-            int hb  = intEnvOr("HEARTBEAT_MS", 10_000);
-            int maxXml = intEnvOr("MAX_XML_BYTES", 32_000_000);
+            // default requested endpoint
+            String postRaw = System.getenv("WX_POST_URL");
+            URI postUrl = (postRaw == null || postRaw.isBlank())
+                    ? URI.create("http://localhost:8080/api/wx/radar")
+                    : URI.create(postRaw.trim());
 
-            String postRaw = envOrFirst("http://localhost:8080/api/wx/radar", "WX_POST_URL", "ITWS_POST_URL");
-            URI postUrl = URI.create(postRaw);
+            int rto = parseIntOrDefault(System.getenv("ITWS_RECEIVE_TIMEOUT_MS"), 1000);
+            int hb  = parseIntOrDefault(System.getenv("ITWS_HEARTBEAT_MS"), 5000);
+            int max = parseIntOrDefault(System.getenv("ITWS_MAX_XML_BYTES"), 32 * 1024 * 1024);
 
-            String token = System.getenv("ITWS_INGEST_TOKEN"); // optional
+            boolean printJson = parseBoolOrDefault(System.getenv("ITWS_PRINT_JSON"), false);
 
-            int cto = intEnvOr("HTTP_CONNECT_TIMEOUT_MS", 1500);
-            int hto = intEnvOr("HTTP_REQUEST_TIMEOUT_MS", 5000);
-            int rs  = intEnvOr("HTTP_RETRY_SLEEP_MS", 250);
+            int cto = parseIntOrDefault(System.getenv("HTTP_CONNECT_TIMEOUT_MS"), 1500);
+            int hto = parseIntOrDefault(System.getenv("HTTP_REQUEST_TIMEOUT_MS"), 5000);
+            int rs  = parseIntOrDefault(System.getenv("HTTP_RETRY_SLEEP_MS"), 200);
 
-            boolean ackOnEx = boolEnvOr("ACK_ON_EXCEPTION", false);
+            boolean ackOnEx = parseBoolOrDefault(System.getenv("ITWS_ACK_ON_EXCEPTION"), false);
 
-            return new Config(url, vpn, user, pass, q, client, selector,
-                    target, rto, hb, maxXml, postUrl, token,
-                    cto, hto, rs, ackOnEx);
+            return new Config(url, vpn, user, pass, q, postUrl, token,
+                    rto, hb, max, printJson, cto, hto, rs, ackOnEx);
         }
 
-        private static String envOr(String k, String def) {
-            String v = System.getenv(k);
-            return (v == null || v.trim().isEmpty()) ? def : v.trim();
+        private static int parseIntOrDefault(String s, int def) {
+            if (s == null || s.isBlank()) return def;
+            try { return Integer.parseInt(s.trim()); } catch (Exception e) { return def; }
         }
 
-        private static String envOrFirst(String def, String... keys) {
-            for (String k : keys) {
-                String v = System.getenv(k);
-                if (v != null && !v.trim().isEmpty()) {
-                    return v.trim();
-                }
-            }
-            return def;
-        }
-
-        private static int intEnvOr(String k, int def) {
-            String v = System.getenv(k);
-            if (v == null || v.trim().isEmpty()) return def;
-            try { return Integer.parseInt(v.trim()); } catch (Exception e) { return def; }
-        }
-
-        private static boolean boolEnvOr(String k, boolean def) {
-            String v = System.getenv(k);
-            if (v == null || v.trim().isEmpty()) return def;
-            String s = v.trim().toLowerCase(Locale.ROOT);
-            return s.equals("1") || s.equals("true") || s.equals("yes") || s.equals("y");
+        private static boolean parseBoolOrDefault(String s, boolean def) {
+            if (s == null || s.isBlank()) return def;
+            String v = s.trim().toLowerCase(Locale.ROOT);
+            return v.equals("1") || v.equals("true") || v.equals("yes") || v.equals("y");
         }
 
         private static String must(String k) {
             String v = System.getenv(k);
             if (v == null || v.isBlank()) throw new IllegalArgumentException("Missing env var: " + k);
-            return v.trim();
-        }
-
-        private static String mustFirst(String... keys) {
-            for (String k : keys) {
-                String v = System.getenv(k);
-                if (v != null && !v.trim().isEmpty()) return v.trim();
-            }
-            throw new IllegalArgumentException("Missing required env var (one of): " + String.join(", ", keys));
+            return v;
         }
     }
 }
