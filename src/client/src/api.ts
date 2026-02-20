@@ -308,6 +308,198 @@ export function decodeWxZlibFrameLevels(base64: string, rows: number, cols: numb
   return levels;
 }
 
+function parseIsoTimeMs(value: unknown): number | null {
+  const text = asString(value);
+  if (!text) {
+    return null;
+  }
+  const parsed = Date.parse(text);
+  if (!Number.isFinite(parsed) || parsed < 0) {
+    return null;
+  }
+  return Math.floor(parsed);
+}
+
+function parseRleTotalCellCount(rle: string): number {
+  let i = 0;
+  const len = rle.length;
+  let total = 0;
+
+  while (i < len) {
+    while (i < len && rle.charCodeAt(i) <= 32) {
+      i += 1;
+    }
+    if (i >= len) {
+      break;
+    }
+
+    let sawLevelDigit = false;
+    while (i < len) {
+      const code = rle.charCodeAt(i);
+      if (code === 44) {
+        i += 1;
+        break;
+      }
+      if (code < 48 || code > 57) {
+        throw new Error(`invalid RLE level token at index ${i}`);
+      }
+      sawLevelDigit = true;
+      i += 1;
+    }
+    if (!sawLevelDigit) {
+      throw new Error("invalid RLE level token");
+    }
+
+    let count = 0;
+    let sawCountDigit = false;
+    while (i < len) {
+      const code = rle.charCodeAt(i);
+      if (code <= 32) {
+        break;
+      }
+      if (code < 48 || code > 57) {
+        throw new Error(`invalid RLE count token at index ${i}`);
+      }
+      sawCountDigit = true;
+      count = count * 10 + (code - 48);
+      i += 1;
+    }
+    if (!sawCountDigit) {
+      throw new Error("invalid RLE count token");
+    }
+    total += count;
+  }
+
+  return total;
+}
+
+export function decodeWxRleFrameLevels(rle: string, rows: number, cols: number): number[] {
+  const expected = rows * cols;
+  const out = new Array<number>(expected).fill(0);
+  let pos = 0;
+  let i = 0;
+  const len = rle.length;
+
+  while (i < len) {
+    while (i < len && rle.charCodeAt(i) <= 32) {
+      i += 1;
+    }
+    if (i >= len) {
+      break;
+    }
+
+    let level = 0;
+    let sawLevelDigit = false;
+    while (i < len) {
+      const code = rle.charCodeAt(i);
+      if (code === 44) {
+        i += 1;
+        break;
+      }
+      if (code < 48 || code > 57) {
+        throw new Error(`invalid RLE level token at index ${i}`);
+      }
+      sawLevelDigit = true;
+      level = level * 10 + (code - 48);
+      i += 1;
+    }
+    if (!sawLevelDigit) {
+      throw new Error("invalid RLE level token");
+    }
+
+    let count = 0;
+    let sawCountDigit = false;
+    while (i < len) {
+      const code = rle.charCodeAt(i);
+      if (code <= 32) {
+        break;
+      }
+      if (code < 48 || code > 57) {
+        throw new Error(`invalid RLE count token at index ${i}`);
+      }
+      sawCountDigit = true;
+      count = count * 10 + (code - 48);
+      i += 1;
+    }
+    if (!sawCountDigit) {
+      throw new Error("invalid RLE count token");
+    }
+
+    const end = pos + count;
+    if (end > expected) {
+      throw new Error(`RLE overruns grid: pos=${pos} count=${count} end=${end} expected=${expected}`);
+    }
+    if (level !== 0 && count > 0) {
+      out.fill(clampWxLevel(level), pos, end);
+    }
+    pos = end;
+  }
+
+  if (pos !== expected) {
+    throw new Error(`RLE length mismatch: decoded=${pos} expected=${expected}`);
+  }
+
+  return out;
+}
+
+export interface DecodedWxFrameLevels {
+  rows: number;
+  cols: number;
+  levels: number[];
+}
+
+export function decodeWxFrameLevels(
+  frame: NonNullable<WxReflectivityResponse["frames"]>[number],
+  fallbackRows: number,
+  fallbackCols: number
+): DecodedWxFrameLevels {
+  const safeFallbackRows = Math.max(1, Math.floor(fallbackRows));
+  const safeFallbackCols = Math.max(1, Math.floor(fallbackCols));
+
+  const zlibData = asString(frame.data);
+  if (zlibData) {
+    return {
+      rows: safeFallbackRows,
+      cols: safeFallbackCols,
+      levels: decodeWxZlibFrameLevels(zlibData, safeFallbackRows, safeFallbackCols)
+    };
+  }
+
+  const cellsRle = asString(frame.grid?.cellsRle);
+  if (!cellsRle) {
+    throw new Error("frame is missing both zlib data and RLE cells");
+  }
+
+  const declaredRows = asPositiveInt(frame.grid?.rows);
+  const declaredCols = asPositiveInt(frame.grid?.cols);
+  const gridMaxRows = asPositiveInt(frame.grid?.rawDims?.gridMaxY);
+  const gridMaxCols = asPositiveInt(frame.grid?.rawDims?.gridMaxX);
+  const decodedCellsTotal = parseRleTotalCellCount(cellsRle);
+
+  let rows = declaredRows ?? safeFallbackRows;
+  let cols = declaredCols ?? safeFallbackCols;
+  if (rows * cols !== decodedCellsTotal) {
+    if (
+      gridMaxRows !== null &&
+      gridMaxCols !== null &&
+      gridMaxRows * gridMaxCols === decodedCellsTotal
+    ) {
+      rows = gridMaxRows;
+      cols = gridMaxCols;
+    } else {
+      throw new Error(
+        `RLE dimensions mismatch: decoded=${decodedCellsTotal} rows=${rows} cols=${cols}`
+      );
+    }
+  }
+
+  return {
+    rows,
+    cols,
+    levels: decodeWxRleFrameLevels(cellsRle, rows, cols)
+  };
+}
+
 function normalizeWxPayload(
   payload: unknown,
   requestedCenter: { lat: number; lon: number },
@@ -317,11 +509,283 @@ function normalizeWxPayload(
   const rootCenter = asObject(root?.center);
   const trp = asObject(root?.trp);
   const gridGeom = asObject(root?.gridGeom);
+  const historyFramesRaw = Array.isArray(root?.frames) ? root?.frames : null;
+
+  // STARS-style ITWS history payload:
+  // { updatedAtMs, levels:[...], frames:[{ receiverMs, grid:{..., cellsEncoding:"rle", cellsRle:"..." }}, ...] }
+  const firstHistoryFrame = historyFramesRaw && historyFramesRaw.length > 0 ? asObject(historyFramesRaw[0]) : null;
+  const firstHistoryFrameGrid = asObject(firstHistoryFrame?.grid);
+  if (historyFramesRaw && historyFramesRaw.length > 0 && firstHistoryFrameGrid) {
+    const observedLevels = normalizeObservedLevels(root?.levels);
+
+    const frames = historyFramesRaw
+      .map((rawFrame) => {
+        const frame = asObject(rawFrame);
+        if (!frame) {
+          return null;
+        }
+        const frameGrid = asObject(frame.grid);
+        const frameRawDims = asObject(frameGrid?.rawDims);
+        const frameTrp = asObject(frameGrid?.trp);
+        const frameGeom = asObject(frameGrid?.geom);
+        const data = asString(frame.data) ?? undefined;
+        const cellsRle = asString(frameGrid?.cellsRle) ?? undefined;
+        if (!data && !cellsRle) {
+          return null;
+        }
+
+        const epochMs =
+          asNonNegativeInt(frame.receiverMs) ??
+          asNonNegativeInt(frame.tEpochMs) ??
+          asNonNegativeInt(frame.itwsGenTimeMs) ??
+          parseIsoTimeMs(frame.receivedAt) ??
+          parseIsoTimeMs(frame.t) ??
+          undefined;
+        const frameLayoutText = asString(frameGrid?.layout);
+        const frameLayout =
+          frameLayoutText === "row-major" || frameLayoutText === "column-major"
+            ? (frameLayoutText as WxReflectivityResponse["layout"])
+            : undefined;
+
+        return {
+          t: asString(frame.t) ?? asString(frame.receivedAt) ?? undefined,
+          tEpochMs: epochMs,
+          maxLevel:
+            asNonNegativeInt(frame.maxLevel) ??
+            asNonNegativeInt(frameGrid?.maxLevel) ??
+            asNonNegativeInt(frameGrid?.itwsMaxPrecipLevel) ??
+            undefined,
+          rawBytes: asNonNegativeInt(frame.rawBytes) ?? undefined,
+          zlibBytes: asNonNegativeInt(frame.zlibBytes) ?? undefined,
+          data,
+          receiverMs: asNonNegativeInt(frame.receiverMs) ?? undefined,
+          receivedAt: asString(frame.receivedAt) ?? undefined,
+          itwsGenTimeMs: asNonNegativeInt(frame.itwsGenTimeMs) ?? undefined,
+          itwsExpTimeMs: asNonNegativeInt(frame.itwsExpTimeMs) ?? undefined,
+          productId: asNonNegativeInt(frame.productId) ?? undefined,
+          productName: asString(frame.productName) ?? undefined,
+          site: asString(frame.site) ?? undefined,
+          airport: asString(frame.airport) ?? undefined,
+          grid: frameGrid
+            ? {
+                rows: asPositiveInt(frameGrid.rows) ?? undefined,
+                cols: asPositiveInt(frameGrid.cols) ?? undefined,
+                dimsSource: asString(frameGrid.dimsSource) ?? undefined,
+                rawDims: frameRawDims
+                  ? {
+                      nrows: asPositiveInt(frameRawDims.nrows) ?? undefined,
+                      ncols: asPositiveInt(frameRawDims.ncols) ?? undefined,
+                      gridMaxY: asPositiveInt(frameRawDims.gridMaxY) ?? undefined,
+                      gridMaxX: asPositiveInt(frameRawDims.gridMaxX) ?? undefined
+                    }
+                  : undefined,
+                layout: frameLayout,
+                trp:
+                  normalizeCoordinateDegrees(frameTrp?.latDeg, "lat") !== null &&
+                  normalizeCoordinateDegrees(frameTrp?.lonDeg, "lon") !== null
+                    ? {
+                        latDeg: normalizeCoordinateDegrees(frameTrp?.latDeg, "lat") as number,
+                        lonDeg: normalizeCoordinateDegrees(frameTrp?.lonDeg, "lon") as number
+                      }
+                    : undefined,
+                geom:
+                  asFiniteNumber(frameGeom?.xOffsetM) !== null &&
+                  asFiniteNumber(frameGeom?.yOffsetM) !== null &&
+                  asFiniteNumber(frameGeom?.dxM) !== null &&
+                  asFiniteNumber(frameGeom?.dyM) !== null &&
+                  asFiniteNumber(frameGeom?.rotationDeg) !== null
+                    ? {
+                        xOffsetM: asFiniteNumber(frameGeom?.xOffsetM) as number,
+                        yOffsetM: asFiniteNumber(frameGeom?.yOffsetM) as number,
+                        dxM: asFiniteNumber(frameGeom?.dxM) as number,
+                        dyM: asFiniteNumber(frameGeom?.dyM) as number,
+                        rotationDeg: asFiniteNumber(frameGeom?.rotationDeg) as number
+                      }
+                    : undefined,
+                cellsEncoding: asString(frameGrid.cellsEncoding) ?? undefined,
+                cellsRle,
+                cellsTotal: asPositiveInt(frameGrid.cellsTotal) ?? undefined,
+                nonZeroCells: asNonNegativeInt(frameGrid.nonZeroCells) ?? undefined,
+                itwsMaxPrecipLevel: asNonNegativeInt(frameGrid.itwsMaxPrecipLevel) ?? undefined
+              }
+            : undefined
+        };
+      })
+      .filter((frame) => frame !== null) as Array<NonNullable<WxReflectivityResponse["frames"]>[number]>;
+
+    if (frames.length > 0) {
+      const fallbackRows =
+        asPositiveInt(root?.rows) ??
+        asPositiveInt(firstHistoryFrameGrid.rows) ??
+        asPositiveInt(asObject(firstHistoryFrameGrid.rawDims)?.gridMaxY) ??
+        1;
+      const fallbackCols =
+        asPositiveInt(root?.cols) ??
+        asPositiveInt(firstHistoryFrameGrid.cols) ??
+        asPositiveInt(asObject(firstHistoryFrameGrid.rawDims)?.gridMaxX) ??
+        1;
+
+      const sortedIndices = frames
+        .map((frame, index) => ({
+          index,
+          epochMs: frame.tEpochMs ?? frame.receiverMs ?? frame.itwsGenTimeMs ?? 0
+        }))
+        .sort((a, b) => (a.epochMs === b.epochMs ? b.index - a.index : b.epochMs - a.epochMs));
+
+      let latestFrame: NonNullable<WxReflectivityResponse["frames"]>[number] | null = null;
+      let latestDecoded: DecodedWxFrameLevels | null = null;
+      for (let i = 0; i < sortedIndices.length; i += 1) {
+        const candidate = frames[sortedIndices[i].index];
+        try {
+          latestDecoded = decodeWxFrameLevels(candidate, fallbackRows, fallbackCols);
+          latestFrame = candidate;
+          break;
+        } catch (error) {
+          console.warn("Skipping invalid STARS WX frame:", error);
+        }
+      }
+
+      if (!latestFrame || !latestDecoded) {
+        const rows = Math.max(1, fallbackRows);
+        const cols = Math.max(1, fallbackCols);
+        latestFrame = frames[0];
+        latestDecoded = {
+          rows,
+          cols,
+          levels: new Array<number>(rows * cols).fill(0)
+        };
+      }
+
+      const latestGrid = latestFrame.grid;
+      const latestTrp = latestGrid?.trp;
+      const latestGeom = latestGrid?.geom;
+      const trpLatDeg =
+        normalizeCoordinateDegrees(latestTrp?.latDeg, "lat") ??
+        normalizeCoordinateDegrees(trp?.latDeg, "lat") ??
+        normalizeCoordinateDegrees(rootCenter?.lat, "lat") ??
+        requestedCenter.lat;
+      const trpLonDeg =
+        normalizeCoordinateDegrees(latestTrp?.lonDeg, "lon") ??
+        normalizeCoordinateDegrees(trp?.lonDeg, "lon") ??
+        normalizeCoordinateDegrees(rootCenter?.lon, "lon") ??
+        requestedCenter.lon;
+      const centerLat = normalizeCoordinateDegrees(rootCenter?.lat, "lat") ?? trpLatDeg;
+      const centerLon = normalizeCoordinateDegrees(rootCenter?.lon, "lon") ?? trpLonDeg;
+      const xOffsetM = asFiniteNumber(latestGeom?.xOffsetM) ?? asFiniteNumber(gridGeom?.xOffsetM) ?? 0;
+      const yOffsetM = asFiniteNumber(latestGeom?.yOffsetM) ?? asFiniteNumber(gridGeom?.yOffsetM) ?? 0;
+      const dxM = asFiniteNumber(latestGeom?.dxM) ?? asFiniteNumber(gridGeom?.dxM) ?? 1852 * 0.5;
+      const dyM = asFiniteNumber(latestGeom?.dyM) ?? asFiniteNumber(gridGeom?.dyM) ?? 1852 * 0.5;
+      const rotationDeg = asFiniteNumber(latestGeom?.rotationDeg) ?? asFiniteNumber(gridGeom?.rotationDeg) ?? 0;
+      const cellSizeNmFromMeters = Math.max(dxM, dyM) / 1852;
+      const derivedRadiusNm = Math.max(latestDecoded.cols * dxM, latestDecoded.rows * dyM) / (2 * 1852);
+      const radiusNm =
+        asFiniteNumber(root?.radiusNm) ??
+        (Number.isFinite(derivedRadiusNm) && derivedRadiusNm > 0
+          ? derivedRadiusNm
+          : (requestedRadiusNm ?? 80));
+
+      let filledCells = asNonNegativeInt(latestGrid?.nonZeroCells) ?? 0;
+      if (filledCells === 0) {
+        for (let i = 0; i < latestDecoded.levels.length; i += 1) {
+          if (latestDecoded.levels[i] > 0) {
+            filledCells += 1;
+          }
+        }
+      }
+
+      let maxLevelAll = asNonNegativeInt(root?.maxLevelAll) ?? 0;
+      if (maxLevelAll === 0) {
+        for (let i = 0; i < frames.length; i += 1) {
+          maxLevelAll = Math.max(maxLevelAll, frames[i].maxLevel ?? 0);
+        }
+      }
+      if (maxLevelAll === 0 && observedLevels && observedLevels.length > 0) {
+        maxLevelAll = observedLevels[observedLevels.length - 1];
+      }
+
+      const layout = latestGrid?.layout ?? "row-major";
+      const updatedAtMs =
+        asNonNegativeInt(root?.updatedAtMs) ??
+        latestFrame.receiverMs ??
+        latestFrame.tEpochMs ??
+        latestFrame.itwsGenTimeMs ??
+        Date.now();
+
+      return {
+        updatedAtMs,
+        region: normalizeWxRegion(root?.region),
+        center: {
+          lat: centerLat,
+          lon: centerLon
+        },
+        radiusNm,
+        cellSizeNm: cellSizeNmFromMeters > 0 ? cellSizeNmFromMeters : 0.5,
+        width: latestDecoded.cols,
+        height: latestDecoded.rows,
+        levels: latestDecoded.levels,
+        receivedAt:
+          latestFrame.receivedAt ??
+          latestFrame.t ??
+          asString(root?.receivedAt) ??
+          undefined,
+        productId: latestFrame.productId ?? asNonNegativeInt(root?.productId) ?? undefined,
+        productName: latestFrame.productName ?? asString(root?.productName) ?? undefined,
+        site: latestFrame.site ?? asString(root?.site) ?? undefined,
+        airport: latestFrame.airport ?? asString(root?.airport) ?? undefined,
+        rows: latestDecoded.rows,
+        cols: latestDecoded.cols,
+        compression:
+          latestGrid?.cellsEncoding ??
+          asString(root?.compression) ??
+          asString(root?.dataEncoding) ??
+          "rle",
+        maxPrecipLevel:
+          asNonNegativeInt(root?.maxPrecipLevel) ??
+          latestFrame.maxLevel ??
+          (maxLevelAll || undefined),
+        filledCells,
+        layout,
+        cells: latestDecoded.levels.slice(0, latestDecoded.rows * latestDecoded.cols),
+        trp: {
+          latDeg: trpLatDeg,
+          lonDeg: trpLonDeg
+        },
+        gridGeom: {
+          xOffsetM,
+          yOffsetM,
+          dxM,
+          dyM,
+          rotationDeg
+        },
+        schema: asString(root?.schema) ?? undefined,
+        levelsEncoding: asString(root?.levelsEncoding) ?? undefined,
+        dataEncoding: asString(root?.dataEncoding) ?? undefined,
+        maxLevelAll: maxLevelAll || undefined,
+        observedLevels,
+        grid: {
+          rows: latestDecoded.rows,
+          cols: latestDecoded.cols,
+          dxM,
+          dyM,
+          rotationDeg,
+          trp: {
+            latDeg: trpLatDeg,
+            lonDeg: trpLonDeg
+          },
+          origin: {
+            xOffsetM,
+            yOffsetM,
+            mode: latestGrid?.dimsSource
+          }
+        },
+        frames
+      };
+    }
+  }
 
   // ITWS Forecast history payload:
   // { schema, grid:{...}, frames:[{data: "zlib+base64"}] }
   const historyGrid = asObject(root?.grid);
-  const historyFramesRaw = Array.isArray(root?.frames) ? root?.frames : null;
   if (historyGrid && historyFramesRaw && historyFramesRaw.length > 0) {
     const observedLevels = normalizeObservedLevels(root?.levels);
     const historyTrp = asObject(historyGrid.trp);
