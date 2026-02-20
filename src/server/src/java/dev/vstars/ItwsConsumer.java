@@ -59,11 +59,15 @@ public final class ItwsConsumer {
 
         FrameCache cache = new FrameCache(CACHE_N);
 
-        try (Connection conn = cf.createConnection();
-             Session session = conn.createSession(false, Session.CLIENT_ACKNOWLEDGE)) {
+        Connection conn = null;
+        Session session = null;
+        MessageConsumer consumer = null;
+        try {
+            conn = cf.createConnection();
+            session = conn.createSession(false, Session.CLIENT_ACKNOWLEDGE);
 
             Queue queue = session.createQueue(cfg.queueName);
-            MessageConsumer consumer = session.createConsumer(queue);
+            consumer = session.createConsumer(queue);
 
             conn.start();
             System.out.println("Connected. Consuming queue: " + cfg.queueName);
@@ -145,6 +149,16 @@ public final class ItwsConsumer {
                         try { msg.acknowledge(); } catch (Exception ignored) {}
                     }
                 }
+            }
+        } finally {
+            if (consumer != null) {
+                try { consumer.close(); } catch (JMSException ignored) {}
+            }
+            if (session != null) {
+                try { session.close(); } catch (JMSException ignored) {}
+            }
+            if (conn != null) {
+                try { conn.close(); } catch (JMSException ignored) {}
             }
         }
     }
