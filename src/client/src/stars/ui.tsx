@@ -359,6 +359,7 @@ export class StarsUiRenderer {
     const labelInsetPx = Math.max(0, options.labelInsetPx ?? DEFAULT_COMPASS_OPTIONS.labelInsetPx);
     const topBottomLabelExtraInsetPx = 4;
     const topBottomLabelGapPx = 2;
+    const leftRightTickScale = 0.78;
     const labelVerticalNudgePx = options.labelVerticalNudgePx ?? 0;
     const showMinorTicks = options.showMinorTicks ?? DEFAULT_COMPASS_OPTIONS.showMinorTicks;
     const showMajorTicks = options.showMajorTicks ?? DEFAULT_COMPASS_OPTIONS.showMajorTicks;
@@ -443,6 +444,9 @@ export class StarsUiRenderer {
           const maxLength = Math.max(1, maxInwardDepthPx) / inwardProjection;
           length = Math.min(length, maxLength);
         }
+      }
+      if (anchor.side === "left" || anchor.side === "right") {
+        length = Math.max(1, length * leftRightTickScale);
       }
       let x0 = anchor.x;
       let y0 = anchor.y;

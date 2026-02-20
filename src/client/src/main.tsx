@@ -26,7 +26,7 @@ import type {
   DcbWxLevelsInput
 } from "./stars/dcb.js";
 import {
-  decodeWxZlibFrameLevels,
+  decodeWxFrameLevels,
   fetchAircraftCps,
   fetchAircraftFeed,
   fetchWxQnh,
@@ -224,6 +224,7 @@ const DATABLOCK_LEADER_LEVEL_STEP_PX = 10;
 const DATABLOCK_LEADER_ZERO_MARGIN_PX = 5;
 const WX_REFRESH_MS = 10_000;
 const WX_HISTORY_FRAME_DURATION_MS = 5_000;
+const WX_STIPPLE_ZOOM_INTERACTION_GRACE_MS = 180;
 const WX_FETCH_MIN_RADIUS_NM = 50;
 const WX_FETCH_PADDING_NM = 20;
 const WX_FETCH_MAX_RADIUS_NM = 150;
@@ -369,6 +370,8 @@ interface RangeBearingLine {
 
 interface WxHistoryPlaybackFrame {
   frameNo: number;
+  rows: number;
+  cols: number;
   levels: number[];
 }
 
@@ -2261,6 +2264,8 @@ function StarsApp(): ReturnType<typeof createElement> {
         let wxHistoryPlaybackIndex = -1;
         let wxHistoryPlaybackFrameNo: number | null = null;
         let wxHistoryPlaybackTimer: number | null = null;
+        let wxZoomInteractionActive = false;
+        let wxZoomInteractionTimer: number | null = null;
         let wxRefreshInFlight = false;
         let coastSuspendCallsigns: string[] = [];
         let laCaMciConflictAlerts: string[] = [];
@@ -2829,7 +2834,7 @@ function StarsApp(): ReturnType<typeof createElement> {
           }
 
           ctx.clearRect(0, 0, ctx.canvas.width, ctx.canvas.height);
-          rendererRef.current.drawRadarScope(ctx, scopeRect, { fillBackground: !mapRenderer, drawBorder: false });
+          rendererRef.current.drawRadarScope(ctx, scopeRect, { fillBackground: true, drawBorder: false });
 
           wxRendererRef.current?.draw(ctx, {
             scopeRect,
@@ -2841,7 +2846,8 @@ function StarsApp(): ReturnType<typeof createElement> {
             radar: getWxRadarForDraw(),
             lowLevelFillColor: wxFillColors.low,
             highLevelFillColor: wxFillColors.high,
-            stippleBrightnessPercent: wxStippleBrightnessPercent
+            stippleBrightnessPercent: wxStippleBrightnessPercent,
+            zoomInteractionActive: wxZoomInteractionActive
           });
 
           rendererRef.current.drawCompassRose(ctx, scopeRect, {
@@ -2871,7 +2877,14 @@ function StarsApp(): ReturnType<typeof createElement> {
             rrBrightnessPercent
           );
 
-          if (!mapRenderer) {
+          if (mapRenderer && mapCanvas) {
+            ctx.save();
+            ctx.beginPath();
+            ctx.rect(scopeRect.x, scopeRect.y, scopeRect.width, scopeRect.height);
+            ctx.clip();
+            ctx.drawImage(mapCanvas, 0, 0, cssWidth, cssHeight);
+            ctx.restore();
+          } else {
             drawSelectedVideoMaps(
               ctx,
               scopeRect,
@@ -3328,6 +3341,23 @@ function StarsApp(): ReturnType<typeof createElement> {
           }
         };
 
+        const armWxZoomInteraction = (): void => {
+          wxZoomInteractionActive = true;
+          if (wxZoomInteractionTimer !== null) {
+            window.clearTimeout(wxZoomInteractionTimer);
+          }
+          wxZoomInteractionTimer = window.setTimeout(() => {
+            wxZoomInteractionTimer = null;
+            if (!wxZoomInteractionActive) {
+              return;
+            }
+            wxZoomInteractionActive = false;
+            if (!disposed) {
+              render();
+            }
+          }, WX_STIPPLE_ZOOM_INTERACTION_GRACE_MS);
+        };
+
         const stopWxHistoryPlayback = (): void => {
           clearWxHistoryPlaybackTimer();
           wxHistoryPlaybackRadar = null;
@@ -3343,11 +3373,13 @@ function StarsApp(): ReturnType<typeof createElement> {
             wxHistoryPlaybackIndex < wxHistoryPlaybackFrames.length
           ) {
             const frame = wxHistoryPlaybackFrames[wxHistoryPlaybackIndex];
-            const rows = wxHistoryPlaybackRadar.rows ?? wxHistoryPlaybackRadar.height;
-            const cols = wxHistoryPlaybackRadar.cols ?? wxHistoryPlaybackRadar.width;
-            const expected = Math.max(0, rows * cols);
+            const expected = Math.max(0, frame.rows * frame.cols);
             return {
               ...wxHistoryPlaybackRadar,
+              width: frame.cols,
+              height: frame.rows,
+              rows: frame.rows,
+              cols: frame.cols,
               levels: frame.levels,
               cells: frame.levels.slice(0, expected)
             };
@@ -3387,9 +3419,12 @@ function StarsApp(): ReturnType<typeof createElement> {
             .map((frame, index) => ({
               frame,
               index,
-              epochMs: frame.tEpochMs ?? 0
+              epochMs:
+                frame.tEpochMs ??
+                frame.receiverMs ??
+                frame.itwsGenTimeMs ??
+                0
             }))
-            .filter((entry) => typeof entry.frame.data === "string" && entry.frame.data.length > 0)
             .sort((a, b) => (a.epochMs === b.epochMs ? a.index - b.index : a.epochMs - b.epochMs));
           if (sortedFrames.length < 2) {
             return false;
@@ -3405,9 +3440,12 @@ function StarsApp(): ReturnType<typeof createElement> {
           const decodedFrames: WxHistoryPlaybackFrame[] = [];
           for (let i = 0; i < historicalFrames.length; i += 1) {
             try {
+              const decoded = decodeWxFrameLevels(historicalFrames[i].frame, rows, cols);
               decodedFrames.push({
                 frameNo: historicalFrames.length - i,
-                levels: decodeWxZlibFrameLevels(historicalFrames[i].frame.data, rows, cols)
+                rows: decoded.rows,
+                cols: decoded.cols,
+                levels: decoded.levels
               });
             } catch (error) {
               console.warn("Skipping invalid WX history frame during playback:", error);
@@ -5312,6 +5350,7 @@ function StarsApp(): ReturnType<typeof createElement> {
           if (!applyZoomAtScopePoint(pointerX, pointerY, scale)) {
             return;
           }
+          armWxZoomInteraction();
           ensureWxCoverageForCurrentRange();
           render();
         };
@@ -5372,6 +5411,7 @@ function StarsApp(): ReturnType<typeof createElement> {
           const nextRangeNm = clampVideoMapRange(touchPinchState.startRangeNm * ratio);
           if (nextRangeNm !== videoMapRangeNm) {
             videoMapRangeNm = nextRangeNm;
+            armWxZoomInteraction();
             ensureWxCoverageForCurrentRange();
             render();
           }
@@ -5463,6 +5503,10 @@ function StarsApp(): ReturnType<typeof createElement> {
           window.clearInterval(qnhTimer);
           window.clearInterval(aircraftTimer);
           window.clearInterval(wxTimer);
+          if (wxZoomInteractionTimer !== null) {
+            window.clearTimeout(wxZoomInteractionTimer);
+            wxZoomInteractionTimer = null;
+          }
           if (wxHistoryPlaybackTimer !== null) {
             window.clearTimeout(wxHistoryPlaybackTimer);
             wxHistoryPlaybackTimer = null;
