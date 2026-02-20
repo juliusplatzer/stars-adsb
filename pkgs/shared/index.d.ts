@@ -81,6 +81,39 @@ export interface WxReflectivityResponse {
     maxLevel?: number;
     rawBytes?: number;
     zlibBytes?: number;
-    data: string;
+    data?: string;
+    receiverMs?: number;
+    receivedAt?: string;
+    itwsGenTimeMs?: number;
+    itwsExpTimeMs?: number;
+    productId?: number;
+    productName?: string;
+    site?: string;
+    airport?: string;
+    grid?: {
+      rows?: number;
+      cols?: number;
+      dimsSource?: string;
+      rawDims?: {
+        nrows?: number;
+        ncols?: number;
+        gridMaxY?: number;
+        gridMaxX?: number;
+      };
+      layout?: WxLayout;
+      trp?: { latDeg: number; lonDeg: number };
+      geom?: {
+        xOffsetM: number;
+        yOffsetM: number;
+        dxM: number;
+        dyM: number;
+        rotationDeg: number;
+      };
+      cellsEncoding?: string;
+      cellsRle?: string;
+      cellsTotal?: number;
+      nonZeroCells?: number;
+      itwsMaxPrecipLevel?: number;
+    };
   }>;
 }
