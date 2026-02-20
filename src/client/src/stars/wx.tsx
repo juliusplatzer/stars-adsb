@@ -26,6 +26,7 @@ export interface StarsWxDrawInput {
   lowLevelFillColor?: string;
   highLevelFillColor?: string;
   stippleBrightnessPercent?: number;
+  zoomInteractionActive?: boolean;
 }
 
 const WX_STIPPLE_LIGHT: number[] = [
@@ -103,8 +104,9 @@ function toRadians(degrees: number): number {
 }
 
 function resolveStippleKind(level: number): WxStippleKind | null {
-  // Requested mapping for current ITWS workflow.
-  if (level === 2 || level === 4) {
+  // STARS-style bucket styling:
+  // 1/4 solid, 2/5 light stipple, 3/6 dense stipple.
+  if (level === 2 || level === 5) {
     return "light";
   }
   if (level === 3 || level === 6) {
@@ -215,6 +217,17 @@ export class StarsWxRenderer {
     const visibleMaxX = input.scopeRect.x + input.scopeRect.width + cellPx;
     const visibleMinY = input.scopeRect.y - cellPx;
     const visibleMaxY = input.scopeRect.y + input.scopeRect.height + cellPx;
+
+    const lowPath = new Path2D();
+    const highPath = new Path2D();
+    const lightPath = new Path2D();
+    const densePath = new Path2D();
+    let lowCount = 0;
+    let highCount = 0;
+    let lightCount = 0;
+    let denseCount = 0;
+    const densePatternForScale = densePattern && cellPx >= 2.25 ? densePattern : null;
+
     for (let row = 0; row < radar.height; row += 1) {
       const yNm = startYNm - row * cellNm;
       const y = scopeCenterY - yNm * pixelsPerNm - halfCellPx;
@@ -239,18 +252,40 @@ export class StarsWxRenderer {
           continue;
         }
 
-        ctx.fillStyle = level <= 3 ? lowLevelFillColor : highLevelFillColor;
-        ctx.fillRect(x, y, cellPx, cellPx);
+        if (level <= 3) {
+          lowPath.rect(x, y, cellPx, cellPx);
+          lowCount += 1;
+        } else {
+          highPath.rect(x, y, cellPx, cellPx);
+          highCount += 1;
+        }
 
         const stipple = resolveStippleKind(level);
         if (stipple === "light" && lightPattern) {
-          ctx.fillStyle = lightPattern;
-          ctx.fillRect(x, y, cellPx, cellPx);
-        } else if (stipple === "dense" && densePattern) {
-          ctx.fillStyle = densePattern;
-          ctx.fillRect(x, y, cellPx, cellPx);
+          lightPath.rect(x, y, cellPx, cellPx);
+          lightCount += 1;
+        } else if (stipple === "dense" && densePatternForScale) {
+          densePath.rect(x, y, cellPx, cellPx);
+          denseCount += 1;
         }
       }
+    }
+
+    if (lowCount > 0) {
+      ctx.fillStyle = lowLevelFillColor;
+      ctx.fill(lowPath);
+    }
+    if (highCount > 0) {
+      ctx.fillStyle = highLevelFillColor;
+      ctx.fill(highPath);
+    }
+    if (lightPattern && lightCount > 0) {
+      ctx.fillStyle = lightPattern;
+      ctx.fill(lightPath);
+    }
+    if (densePatternForScale && denseCount > 0) {
+      ctx.fillStyle = densePatternForScale;
+      ctx.fill(densePath);
     }
   }
 
@@ -310,6 +345,10 @@ export class StarsWxRenderer {
     const drawHalfColVecY = halfColVecY * colScale;
     const drawHalfRowVecX = halfRowVecX * rowScale;
     const drawHalfRowVecY = halfRowVecY * rowScale;
+    const cellSpanXPx = Math.hypot(drawHalfColVecX * 2, drawHalfColVecY * 2);
+    const cellSpanYPx = Math.hypot(drawHalfRowVecX * 2, drawHalfRowVecY * 2);
+    const densePatternForScale =
+      densePattern && Math.min(cellSpanXPx, cellSpanYPx) >= 2.25 ? densePattern : null;
 
     const cellPadX = Math.abs(drawHalfColVecX) + Math.abs(drawHalfRowVecX);
     const cellPadY = Math.abs(drawHalfColVecY) + Math.abs(drawHalfRowVecY);
@@ -317,6 +356,33 @@ export class StarsWxRenderer {
     const visibleMaxX = input.scopeRect.x + input.scopeRect.width + cellPadX;
     const visibleMinY = input.scopeRect.y - cellPadY;
     const visibleMaxY = input.scopeRect.y + input.scopeRect.height + cellPadY;
+
+    const lowPath = new Path2D();
+    const highPath = new Path2D();
+    const lightPath = new Path2D();
+    const densePath = new Path2D();
+    let lowCount = 0;
+    let highCount = 0;
+    let lightCount = 0;
+    let denseCount = 0;
+
+    const appendQuad = (
+      path: Path2D,
+      x0: number,
+      y0: number,
+      x1: number,
+      y1: number,
+      x2: number,
+      y2: number,
+      x3: number,
+      y3: number
+    ): void => {
+      path.moveTo(x0, y0);
+      path.lineTo(x1, y1);
+      path.lineTo(x2, y2);
+      path.lineTo(x3, y3);
+      path.closePath();
+    };
 
     for (let row = 0; row < rows; row += 1) {
       const yLocalM = gridGeom.yOffsetM + (row + 0.5) * dyM;
@@ -353,24 +419,40 @@ export class StarsWxRenderer {
           continue;
         }
 
-        ctx.beginPath();
-        ctx.moveTo(x0, y0);
-        ctx.lineTo(x1, y1);
-        ctx.lineTo(x2, y2);
-        ctx.lineTo(x3, y3);
-        ctx.closePath();
-        ctx.fillStyle = level <= 3 ? lowLevelFillColor : highLevelFillColor;
-        ctx.fill();
+        if (level <= 3) {
+          appendQuad(lowPath, x0, y0, x1, y1, x2, y2, x3, y3);
+          lowCount += 1;
+        } else {
+          appendQuad(highPath, x0, y0, x1, y1, x2, y2, x3, y3);
+          highCount += 1;
+        }
 
         const stipple = resolveStippleKind(level);
         if (stipple === "light" && lightPattern) {
-          ctx.fillStyle = lightPattern;
-          ctx.fill();
-        } else if (stipple === "dense" && densePattern) {
-          ctx.fillStyle = densePattern;
-          ctx.fill();
+          appendQuad(lightPath, x0, y0, x1, y1, x2, y2, x3, y3);
+          lightCount += 1;
+        } else if (stipple === "dense" && densePatternForScale) {
+          appendQuad(densePath, x0, y0, x1, y1, x2, y2, x3, y3);
+          denseCount += 1;
         }
       }
+    }
+
+    if (lowCount > 0) {
+      ctx.fillStyle = lowLevelFillColor;
+      ctx.fill(lowPath);
+    }
+    if (highCount > 0) {
+      ctx.fillStyle = highLevelFillColor;
+      ctx.fill(highPath);
+    }
+    if (lightPattern && lightCount > 0) {
+      ctx.fillStyle = lightPattern;
+      ctx.fill(lightPath);
+    }
+    if (densePatternForScale && denseCount > 0) {
+      ctx.fillStyle = densePatternForScale;
+      ctx.fill(densePath);
     }
 
     return true;
@@ -394,7 +476,10 @@ export class StarsWxRenderer {
     const lowLevelFillColor = input.lowLevelFillColor ?? colors.DARK_GRAY_BLUE;
     const highLevelFillColor = input.highLevelFillColor ?? colors.DARK_MUSTARD;
     const lightPattern = this.getStipplePattern(ctx, "light", input.stippleBrightnessPercent ?? 100);
-    const densePattern = this.getStipplePattern(ctx, "dense", input.stippleBrightnessPercent ?? 100);
+    const densePattern =
+      input.zoomInteractionActive === true
+        ? null
+        : this.getStipplePattern(ctx, "dense", input.stippleBrightnessPercent ?? 100);
 
     ctx.save();
     ctx.beginPath();
