@@ -142,6 +142,25 @@ export interface DcbBriteInput {
   bottomRow?: DcbBriteMenuButton[];
 }
 
+export interface DcbSsaFilterMenuButton {
+  top: string;
+  bottom: string;
+  active?: boolean;
+  tone?: DcbTileTone;
+  textColor?: string;
+}
+
+export interface DcbSsaFilterInput {
+  x: number;
+  y: number;
+  expanded?: boolean;
+  topRow?: DcbSsaFilterMenuButton[];
+  bottomRow?: DcbSsaFilterMenuButton[];
+  doneActive?: boolean;
+  doneTone?: DcbTileTone;
+  doneTextColor?: string;
+}
+
 export interface DcbColors {
   text: string;
   inactive: string;
@@ -219,6 +238,14 @@ export type DcbMapsControlHit =
   | "maps-current"
   | "maps-map";
 
+export type DcbSsaFilterControlHit =
+  | "ssa-filter-toggle"
+  | "ssa-filter-menu"
+  | "ssa-filter-done"
+  | "ssa-filter-altstg"
+  | "ssa-filter-time"
+  | "ssa-filter-wx";
+
 interface DcbMapTileRect {
   x: number;
   y: number;
@@ -253,6 +280,10 @@ interface DcbBriteMenuTile extends DcbMapTileRect {
 interface DcbMapsMenuTile extends DcbMapTileRect {
   control: DcbMapsControlHit;
   mapId: number | null;
+}
+
+interface DcbSsaFilterMenuTile extends DcbMapTileRect {
+  control: DcbSsaFilterControlHit;
 }
 
 const DEFAULT_DCB_COLORS: DcbColors = {
@@ -777,6 +808,131 @@ export class StarsDcbRenderer {
     return tiles;
   }
 
+  private resolveSsaFilterMenuButtonControl(button: DcbSsaFilterMenuButton | null): DcbSsaFilterControlHit {
+    if (!button) {
+      return "ssa-filter-menu";
+    }
+
+    const normalized = `${button.top} ${button.bottom}`
+      .replace(/\s+/g, " ")
+      .trim()
+      .toUpperCase();
+    if (normalized === "DONE") {
+      return "ssa-filter-done";
+    }
+    if (normalized === "TIME") {
+      return "ssa-filter-time";
+    }
+    if (normalized === "ALTSTG") {
+      return "ssa-filter-altstg";
+    }
+    if (normalized === "WX") {
+      return "ssa-filter-wx";
+    }
+
+    return "ssa-filter-menu";
+  }
+
+  private getSsaFilterMenuMetrics(input: DcbSsaFilterInput): {
+    originX: number;
+    originY: number;
+    columns: number;
+    menuOriginX: number;
+    menuWidth: number;
+    menuHeight: number;
+    toggleX: number;
+    toggleY: number;
+  } {
+    const originX = Math.round(input.x);
+    const originY = Math.round(input.y);
+    const topCount = (input.topRow ?? []).length;
+    const bottomCount = (input.bottomRow ?? []).length;
+    const columns = Math.max(0, Math.max(topCount, bottomCount));
+    const toggleX =
+      originX + MAPS_BIG_BUTTON_WIDTH * 4 + MAPS_BUTTON_GAP_PX * 4;
+    const toggleY = originY;
+    const stackedColumnsWidth =
+      columns <= 0
+        ? 0
+        : columns * MAPS_SMALL_BUTTON_WIDTH + (columns - 1) * MAPS_BUTTON_GAP_PX;
+    const menuWidth =
+      stackedColumnsWidth > 0
+        ? stackedColumnsWidth + MAPS_BUTTON_GAP_PX + MAPS_BIG_BUTTON_WIDTH
+        : MAPS_BIG_BUTTON_WIDTH;
+    const menuOriginX = toggleX - MAPS_BUTTON_GAP_PX - menuWidth;
+    const menuHeight = MAPS_SMALL_BUTTON_HEIGHT * 2 + MAPS_BUTTON_GAP_PX;
+
+    return {
+      originX,
+      originY,
+      columns,
+      menuOriginX,
+      menuWidth,
+      menuHeight,
+      toggleX,
+      toggleY
+    };
+  }
+
+  private getSsaFilterMenuTiles(input: DcbSsaFilterInput): DcbSsaFilterMenuTile[] {
+    const { originY, columns, menuOriginX, toggleX, toggleY } = this.getSsaFilterMenuMetrics(input);
+    const tiles: DcbSsaFilterMenuTile[] = [
+      {
+        x: toggleX,
+        y: toggleY,
+        width: MAPS_BIG_BUTTON_WIDTH,
+        height: MAPS_BIG_BUTTON_HEIGHT,
+        control: "ssa-filter-toggle"
+      }
+    ];
+
+    if (!input.expanded) {
+      return tiles;
+    }
+
+    const topRow = input.topRow ?? [];
+    const bottomRow = input.bottomRow ?? [];
+    const doneX =
+      menuOriginX +
+      (columns <= 0
+        ? 0
+        : columns * MAPS_SMALL_BUTTON_WIDTH + (columns - 1) * MAPS_BUTTON_GAP_PX + MAPS_BUTTON_GAP_PX);
+
+    tiles.push({
+      x: doneX,
+      y: originY,
+      width: MAPS_BIG_BUTTON_WIDTH,
+      height: MAPS_BIG_BUTTON_HEIGHT,
+      control: "ssa-filter-done"
+    });
+
+    if (columns <= 0) {
+      return tiles;
+    }
+
+    for (let i = 0; i < columns; i += 1) {
+      const columnX = menuOriginX + i * (MAPS_SMALL_BUTTON_WIDTH + MAPS_BUTTON_GAP_PX);
+      const top = this.resolveSsaFilterMenuButtonControl(topRow[i] ?? null);
+      const bottom = this.resolveSsaFilterMenuButtonControl(bottomRow[i] ?? null);
+      tiles.push({
+        x: columnX,
+        y: originY,
+        width: MAPS_SMALL_BUTTON_WIDTH,
+        height: MAPS_SMALL_BUTTON_HEIGHT,
+        control: top
+      });
+      tiles.push({
+        x: columnX,
+        y: originY + MAPS_SMALL_BUTTON_HEIGHT + MAPS_BUTTON_GAP_PX,
+        width: MAPS_SMALL_BUTTON_WIDTH,
+        height: MAPS_SMALL_BUTTON_HEIGHT,
+        control: bottom
+      });
+    }
+
+    return tiles;
+  }
+
   hitTestMapsCategory(input: DcbMapCategoryInput, x: number, y: number): number | null {
     const tiles = this.getMapsTiles(input);
     for (const tile of tiles) {
@@ -884,6 +1040,40 @@ export class StarsDcbRenderer {
     };
     if (pointInsideRect(x, y, menuRect)) {
       return { control: "maps-menu", mapId: null };
+    }
+
+    return null;
+  }
+
+  hitTestSsaFilterMenu(
+    input: DcbSsaFilterInput,
+    x: number,
+    y: number
+  ): DcbSsaFilterControlHit | null {
+    const tiles = this.getSsaFilterMenuTiles(input);
+    for (const tile of tiles) {
+      if (!pointInsideRect(x, y, tile)) {
+        continue;
+      }
+      return tile.control;
+    }
+
+    if (!input.expanded) {
+      return null;
+    }
+
+    const metrics = this.getSsaFilterMenuMetrics(input);
+    if (metrics.columns <= 0 || metrics.menuWidth <= 0) {
+      return null;
+    }
+    const menuRect: DcbMapTileRect = {
+      x: metrics.menuOriginX,
+      y: metrics.originY,
+      width: metrics.menuWidth,
+      height: metrics.menuHeight
+    };
+    if (pointInsideRect(x, y, menuRect)) {
+      return "ssa-filter-menu";
     }
 
     return null;
@@ -1499,6 +1689,100 @@ export class StarsDcbRenderer {
     ctx.fillStyle = colors.BLACK;
     ctx.fillRect(menuOriginX, originY, menuWidth, menuHeight);
     ctx.restore();
+
+    for (let i = 0; i < columns; i += 1) {
+      const columnX = menuOriginX + i * (MAPS_SMALL_BUTTON_WIDTH + MAPS_BUTTON_GAP_PX);
+      const top = topRow[i] ?? { top: "", bottom: "", active: false, tone: "normal" };
+      const bottom = bottomRow[i] ?? { top: "", bottom: "", active: false, tone: "normal" };
+
+      drawButtonFrame(
+        ctx,
+        columnX,
+        originY,
+        MAPS_SMALL_BUTTON_WIDTH,
+        MAPS_SMALL_BUTTON_HEIGHT,
+        resolveButtonFillColor(this.palette, top.active, top.tone),
+        this.palette,
+        Boolean(top.active)
+      );
+      drawCenteredLines(
+        ctx,
+        this.font,
+        columnX,
+        originY,
+        MAPS_SMALL_BUTTON_WIDTH,
+        MAPS_SMALL_BUTTON_HEIGHT,
+        [top.top, top.bottom],
+        top.textColor ?? this.palette.text
+      );
+
+      drawButtonFrame(
+        ctx,
+        columnX,
+        originY + MAPS_SMALL_BUTTON_HEIGHT + MAPS_BUTTON_GAP_PX,
+        MAPS_SMALL_BUTTON_WIDTH,
+        MAPS_SMALL_BUTTON_HEIGHT,
+        resolveButtonFillColor(this.palette, bottom.active, bottom.tone),
+        this.palette,
+        Boolean(bottom.active)
+      );
+      drawCenteredLines(
+        ctx,
+        this.font,
+        columnX,
+        originY + MAPS_SMALL_BUTTON_HEIGHT + MAPS_BUTTON_GAP_PX,
+        MAPS_SMALL_BUTTON_WIDTH,
+        MAPS_SMALL_BUTTON_HEIGHT,
+        [bottom.top, bottom.bottom],
+        bottom.textColor ?? this.palette.text
+      );
+    }
+  }
+
+  drawSsaFilterMenu(ctx: CanvasRenderingContext2D, input: DcbSsaFilterInput): void {
+    if (!input.expanded) {
+      return;
+    }
+
+    const { originY, columns, menuOriginX, menuWidth, menuHeight } = this.getSsaFilterMenuMetrics(input);
+    if (menuWidth <= 0) {
+      return;
+    }
+
+    const topRow = (input.topRow ?? []).slice(0, columns);
+    const bottomRow = (input.bottomRow ?? []).slice(0, columns);
+
+    // Keep the expanded submenu readable by masking underlying controls.
+    ctx.save();
+    ctx.fillStyle = colors.BLACK;
+    ctx.fillRect(menuOriginX, originY, menuWidth, menuHeight);
+    ctx.restore();
+
+    const doneX =
+      menuOriginX +
+      (columns <= 0
+        ? 0
+        : columns * MAPS_SMALL_BUTTON_WIDTH + (columns - 1) * MAPS_BUTTON_GAP_PX + MAPS_BUTTON_GAP_PX);
+    drawButtonFrame(
+      ctx,
+      doneX,
+      originY,
+      MAPS_BIG_BUTTON_WIDTH,
+      MAPS_BIG_BUTTON_HEIGHT,
+      resolveButtonFillColor(this.palette, input.doneActive, input.doneTone),
+      this.palette,
+      Boolean(input.doneActive)
+    );
+    drawCenteredLines(
+      ctx,
+      this.font,
+      doneX,
+      originY,
+      MAPS_BIG_BUTTON_WIDTH,
+      MAPS_BIG_BUTTON_HEIGHT,
+      ["DONE"],
+      input.doneTextColor ?? this.palette.text
+    );
 
     for (let i = 0; i < columns; i += 1) {
       const columnX = menuOriginX + i * (MAPS_SMALL_BUTTON_WIDTH + MAPS_BUTTON_GAP_PX);
