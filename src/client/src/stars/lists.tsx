@@ -17,6 +17,9 @@ export interface SsaDrawInput {
   y: number;
   airportIcao: string;
   qnhInHg: number | null;
+  showUtcTime?: boolean;
+  showAltimeter?: boolean;
+  showWxLine?: boolean;
   wxActiveLevels?: ReadonlySet<number>;
   wxAvailableLevels?: ReadonlySet<number>;
   qnhStations?: Array<{
@@ -86,7 +89,7 @@ export interface FlightPlanListDrawInput {
 const DEFAULT_LIST_COLORS: ListsColors = {
   green: colors.GREEN,
   red: colors.RED,
-  ssaWx: colors.DCB_WX_ACTIVE
+  ssaWx: colors.CYAN
 };
 
 function formatUtcTime(nowUtc: Date): string {
@@ -336,12 +339,22 @@ export class StarsListsRenderer {
     const qnhLines = buildSsaQnhLines(stationSource, 3);
     const utcLine = formatUtcTime(input.nowUtc ?? new Date());
     const mainQnhLine = formatQnhInHg(input.qnhInHg);
+    const showUtcTime = input.showUtcTime ?? true;
+    const showAltimeter = input.showAltimeter ?? true;
+    const showWxLine = input.showWxLine ?? true;
     const wxStatusLine = buildSsaWxStatusLine(input.wxActiveLevels, input.wxAvailableLevels);
     const wxHistoryFrameNo =
       typeof input.wxHistoryFrameNo === "number" && Number.isFinite(input.wxHistoryFrameNo)
         ? Math.max(1, Math.floor(input.wxHistoryFrameNo))
         : null;
-    const ssaUtcAltimeterLine = `${utcLine} ${mainQnhLine}`;
+    const ssaUtcAltimeterParts: string[] = [];
+    if (showUtcTime) {
+      ssaUtcAltimeterParts.push(utcLine);
+    }
+    if (showAltimeter) {
+      ssaUtcAltimeterParts.push(mainQnhLine);
+    }
+    const ssaUtcAltimeterLine = ssaUtcAltimeterParts.join(" ");
     const ssaLine2 = "OK/OK/NA MULTI";
     const ssaLine3 = `${formatRangeNm(input.rangeNm ?? null)} PTL: 1.0`;
     const baseLines = [
@@ -353,8 +366,9 @@ export class StarsListsRenderer {
     ];
     const textX = Math.round(input.x);
     const textY = Math.round(input.y + symbolSizePx + 3);
+    const baseLinesY = showWxLine ? textY + this.font.height : textY;
 
-    if (wxStatusLine.length > 0) {
+    if (showWxLine && wxStatusLine.length > 0) {
       drawTintedBitmapText(
         ctx,
         this.font,
@@ -363,22 +377,13 @@ export class StarsListsRenderer {
         wxStatusLine,
         this.colors.ssaWx
       );
-      drawTintedBitmapText(
-        ctx,
-        this.font,
-        textX,
-        textY + this.font.height,
-        baseLines.join("\n"),
-        this.colors.green
-      );
-      return;
     }
 
     drawTintedBitmapText(
       ctx,
       this.font,
       textX,
-      textY,
+      baseLinesY,
       baseLines.join("\n"),
       this.colors.green
     );
