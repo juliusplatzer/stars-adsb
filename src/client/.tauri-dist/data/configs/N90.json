@@ -1,6 +1,13 @@
 {
   "tracon": "N90",
   "videomaps": "src/client/data/videomaps/ZNY_videomaps.json",
+  "sites": [
+    {"label": "E", "name": "EWR"},
+    {"label": "H", "name": "HPN"},
+    {"label": "I", "name": "EWR"},
+    {"label": "J", "name": "JFK"},
+    {"label": "S", "name": "SWF"}
+  ],
   "airports": {
     "KJFK": {
       "mag_var": "13W",
