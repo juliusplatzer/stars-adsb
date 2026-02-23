@@ -17,6 +17,9 @@ export interface SsaDrawInput {
   y: number;
   airportIcao: string;
   qnhInHg: number | null;
+  siteMode?: string;
+  showStatusPart?: boolean;
+  showRadarPart?: boolean;
   showUtcTime?: boolean;
   showAltimeter?: boolean;
   showWxLine?: boolean;
@@ -27,6 +30,8 @@ export interface SsaDrawInput {
     qnhInHg: number | null;
   }>;
   rangeNm?: number | null;
+  ptlLengthMinutes?: number | null;
+  altitudeFilterLine?: string | null;
   wxHistoryFrameNo?: number | null;
   nowUtc?: Date;
   symbolScale?: number;
@@ -58,6 +63,7 @@ export interface TowerListDrawInput {
   x: number;
   y: number;
   airportIata: string;
+  maxAircraftRows?: number;
   aircraft?: Array<{
     callsign: string | null;
     aircraftTypeIcao: string | null;
@@ -82,6 +88,16 @@ export interface FlightPlanListDrawInput {
   entries?: Array<{
     callsign: string | null;
     destination: string | null;
+  }>;
+  align?: "left" | "right";
+}
+
+export interface GeoRestrictionsListDrawInput {
+  x: number;
+  y: number;
+  entries?: Array<{
+    id: number | string;
+    localName: string | null;
   }>;
   align?: "left" | "right";
 }
@@ -167,6 +183,13 @@ function formatRangeNm(rangeNm: number | null): string {
   }
   const rounded = Math.max(0, Math.round(rangeNm));
   return `${rounded}NM`;
+}
+
+function formatPtlLengthMinutes(ptlLengthMinutes: number | null | undefined): string {
+  if (ptlLengthMinutes === null || ptlLengthMinutes === undefined || !Number.isFinite(ptlLengthMinutes)) {
+    return "1.0";
+  }
+  return ptlLengthMinutes.toFixed(1);
 }
 
 function formatZuluHhmm(date: Date): string {
@@ -289,6 +312,10 @@ export class StarsListsRenderer {
     return this.font.height;
   }
 
+  measureTextWidth(text: string): number {
+    return measureBitmapTextWidth(this.font, text);
+  }
+
   drawText(
     ctx: CanvasRenderingContext2D,
     x: number,
@@ -355,12 +382,30 @@ export class StarsListsRenderer {
       ssaUtcAltimeterParts.push(mainQnhLine);
     }
     const ssaUtcAltimeterLine = ssaUtcAltimeterParts.join(" ");
-    const ssaLine2 = "OK/OK/NA MULTI";
-    const ssaLine3 = `${formatRangeNm(input.rangeNm ?? null)} PTL: 1.0`;
+    const showStatusPart = input.showStatusPart ?? true;
+    const showRadarPart = input.showRadarPart ?? true;
+    const normalizedSiteMode =
+      typeof input.siteMode === "string"
+        ? input.siteMode.trim().toUpperCase()
+        : "";
+    const ssaLine2Parts: string[] = [];
+    if (showStatusPart) {
+      ssaLine2Parts.push("OK/OK/NA");
+    }
+    if (showRadarPart) {
+      ssaLine2Parts.push(normalizedSiteMode.length > 0 ? normalizedSiteMode : "MULTI");
+    }
+    const ssaLine2 = ssaLine2Parts.join(" ");
+    const ssaLine3 = `${formatRangeNm(input.rangeNm ?? null)} PTL: ${formatPtlLengthMinutes(
+      input.ptlLengthMinutes
+    )}`;
+    const ssaAltitudeFilterLine =
+      typeof input.altitudeFilterLine === "string" ? input.altitudeFilterLine.trim() : "";
     const baseLines = [
       ssaUtcAltimeterLine,
-      ssaLine2,
+      ...(ssaLine2.length > 0 ? [ssaLine2] : []),
       ssaLine3,
+      ...(ssaAltitudeFilterLine.length > 0 ? [ssaAltitudeFilterLine] : []),
       ...qnhLines,
       ...(wxHistoryFrameNo === null ? [] : [`WX HISTORY: ${wxHistoryFrameNo}`])
     ];
@@ -554,6 +599,7 @@ export class StarsListsRenderer {
   drawTowerList(ctx: CanvasRenderingContext2D, input: TowerListDrawInput): void {
     const airportIata = input.airportIata.trim().toUpperCase();
     const headerLine = `${airportIata} TOWER`;
+    const maxAircraftRows = Math.max(0, Math.floor(input.maxAircraftRows ?? 5));
     const towerRows = (input.aircraft ?? [])
       .map((entry) => {
         const callsign = (entry.callsign ?? "").trim().toUpperCase();
@@ -567,7 +613,7 @@ export class StarsListsRenderer {
         };
       })
       .filter((row): row is { callsign: string; aircraftTypeIcao: string } => row !== null)
-      .slice(0, 5);
+      .slice(0, maxAircraftRows);
     const align = input.align ?? "left";
     const callsignColumnWidthPx = towerRows.reduce(
       (currentMax, row) => Math.max(currentMax, measureBitmapTextWidth(this.font, row.callsign)),
@@ -710,6 +756,58 @@ export class StarsListsRenderer {
         drawX + callsignColumnWidthPx + destinationColumnGapPx,
         rowY,
         row.destination,
+        this.colors.green
+      );
+    }
+  }
+
+  drawGeoRestrictionsList(ctx: CanvasRenderingContext2D, input: GeoRestrictionsListDrawInput): void {
+    const headerLine = "GEO RESTRICTIONS";
+    const entries = (input.entries ?? [])
+      .map((entry) => {
+        const idNumber = Number(entry.id);
+        if (!Number.isFinite(idNumber)) {
+          return null;
+        }
+        const label = (entry.localName ?? "").trim().toUpperCase();
+        return {
+          id: Math.floor(idNumber),
+          label
+        };
+      })
+      .filter((row): row is { id: number; label: string } => row !== null)
+      .sort((a, b) => a.id - b.id);
+    const align = input.align ?? "left";
+    const idColumnWidthPx = entries.reduce(
+      (currentMax, row) => Math.max(currentMax, measureBitmapTextWidth(this.font, String(row.id))),
+      0
+    );
+    const idLabelGapPx = entries.length > 0 ? measureBitmapTextWidth(this.font, " ") : 0;
+    const labelColumnWidthPx = entries.reduce(
+      (currentMax, row) => Math.max(currentMax, measureBitmapTextWidth(this.font, row.label)),
+      0
+    );
+    const rowWidthPx =
+      entries.length > 0 ? idColumnWidthPx + idLabelGapPx + labelColumnWidthPx : 0;
+    const blockWidthPx = Math.max(measureBitmapTextWidth(this.font, headerLine), rowWidthPx);
+
+    let drawX = Math.round(input.x);
+    if (align === "right") {
+      drawX = Math.round(input.x - blockWidthPx);
+    }
+
+    const baseY = Math.round(input.y);
+    drawTintedBitmapText(ctx, this.font, drawX, baseY, headerLine, this.colors.green);
+    for (let i = 0; i < entries.length; i += 1) {
+      const row = entries[i];
+      const rowY = baseY + this.font.height * (i + 1);
+      drawTintedBitmapText(ctx, this.font, drawX, rowY, String(row.id), this.colors.green);
+      drawTintedBitmapText(
+        ctx,
+        this.font,
+        drawX + idColumnWidthPx + idLabelGapPx,
+        rowY,
+        row.label,
         this.colors.green
       );
     }

@@ -23,17 +23,24 @@ import type {
   DcbMapsMenuButton,
   DcbMapsMenuInput,
   DcbRangeRingControlHit,
+  DcbSiteControlHit,
+  DcbSiteMenuButton,
+  DcbSiteMenuInput,
+  DcbSsaFilterControlHit,
+  DcbSsaFilterInput,
   DcbWxLevelsInput
 } from "./stars/dcb.js";
 import {
   decodeWxFrameLevels,
-  fetchAircraftCps,
   fetchAircraftFeed,
+  fetchTfrs,
   fetchWxQnh,
-  fetchWxReflectivity
+  fetchWxReflectivity,
+  type TfrsResponse
 } from "./api.js";
 import type { AircraftFeedItem, WxReflectivityResponse } from "@vstars/shared";
 import starsColors from "./stars/colors.js";
+import { getRestrictionAreaStipplePattern } from "./stars/tfrs.js";
 
 const SCOPE_MARGIN_X_PX = 0;
 const SCOPE_MARGIN_BOTTOM_PX = 18;
@@ -99,6 +106,38 @@ const DCB_MAPS_MENU_BOTTOM_ROW: ReadonlyArray<number | null> = [
   500,
   null
 ];
+const DCB_SSA_FILTER_MENU_TOP_ROW: ReadonlyArray<{ top: string; bottom: string }> = [
+  { top: "ALL", bottom: "" },
+  { top: "TIME", bottom: "" },
+  { top: "STATUS", bottom: "" },
+  { top: "RADAR", bottom: "" },
+  { top: "SPC", bottom: "" },
+  { top: "RANGE", bottom: "" },
+  { top: "ALT FIL", bottom: "" },
+  { top: "INTRAIL", bottom: "" },
+  { top: "AIRPORT", bottom: "" },
+  { top: "TT", bottom: "" },
+  { top: "QL", bottom: "" },
+  { top: "CON/CPL", bottom: "" },
+  { top: "CRDA", bottom: "" },
+  { top: "AMZ", bottom: "" }
+];
+const DCB_SSA_FILTER_MENU_BOTTOM_ROW: ReadonlyArray<{ top: string; bottom: string }> = [
+  { top: "WX", bottom: "" },
+  { top: "ALTSTG", bottom: "" },
+  { top: "PLAN", bottom: "" },
+  { top: "CODES", bottom: "" },
+  { top: "SYS OFF", bottom: "" },
+  { top: "PTL", bottom: "" },
+  { top: "NAS I/F", bottom: "" },
+  { top: "2.5", bottom: "" },
+  { top: "OP MODE", bottom: "" },
+  { top: "WX HIST", bottom: "" },
+  { top: "TW OFF", bottom: "" },
+  { top: "OFF IND", bottom: "" },
+  { top: "FLOW", bottom: "" },
+  { top: "TBFM", bottom: "" }
+];
 const DCB_MAP_LABEL_OVERRIDES: Readonly<Record<number, string>> = {
   102: "R5001_1",
   200: "JFK",
@@ -125,12 +164,10 @@ const DCB_MAP_LABEL_OVERRIDES: Readonly<Record<number, string>> = {
   851: "COAST",
   870: "EOVM"
 };
-const TOWER_LIST_AIRPORT_IATA = "JFK";
 const TOWER_LIST_AIRPORT_ICAO = "KJFK";
 const TOWER_LIST_TRACON = "N90";
 const VIDEO_MAP_CENTER_AIRPORT_ICAO = "KJFK";
 const TOWER_LIST_TOP_RATIO = 0.62;
-const TOWER_LIST_RESERVED_AIRCRAFT_ROWS = 6;
 const VFR_LIST_GAP_LINES = 1;
 const FLIGHT_PLAN_LIST_GAP_LINES = 2;
 const CONTROL_POSITION_ID = "2A";
@@ -146,6 +183,9 @@ const CURRENT_MAPS_LIST_BLOCK_WIDTH_PX = 340;
 const CURRENT_MAPS_LIST_ID_COLUMN_OFFSET_PX = 0;
 const CURRENT_MAPS_LIST_LABEL_COLUMN_OFFSET_PX = 60;
 const CURRENT_MAPS_LIST_NAME_COLUMN_OFFSET_PX = 160;
+const GEO_RESTRICTIONS_LIST_MARGIN_BOTTOM_PX = 80;
+const GEO_RESTRICTIONS_LIST_HORIZONTAL_MARGIN_PX = 12;
+const GEO_RESTRICTIONS_LIST_BLOCK_WIDTH_PX = 440;
 const FONT_BASE_PATH = "/public/font/sddCharFontSetASize1";
 const SSA_AIRPORT_ICAO = "KJFK";
 const SSA_QNH_REFRESH_MS = 60_000;
@@ -155,7 +195,6 @@ const LA_CA_MCI_MAX_CONFLICTS = 5;
 const CA_LATERAL_THRESHOLD_NM = 3;
 const CA_VERTICAL_THRESHOLD_FT = 1000;
 const API_BASE_URL = "http://localhost:8080";
-const TOWER_LIST_AIRPORT_IATA_NORMALIZED = TOWER_LIST_AIRPORT_IATA.trim().toUpperCase();
 const TOWER_LIST_AIRPORT_ICAO_NORMALIZED = TOWER_LIST_AIRPORT_ICAO.trim().toUpperCase();
 const TOWER_LIST_TRACON_NORMALIZED = TOWER_LIST_TRACON.trim().toUpperCase();
 const VIDEO_MAP_CENTER_AIRPORT_ICAO_NORMALIZED = VIDEO_MAP_CENTER_AIRPORT_ICAO.trim().toUpperCase();
@@ -179,6 +218,8 @@ const DCB_BRIGHTNESS_DEFAULT_PERCENT = 80;
 const DCB_BRIGHTNESS_STEP_PERCENT = 5;
 const VIDEO_MAP_DEFAULT_BRIGHTNESS_PERCENT = 50;
 const VIDEO_MAP_BRIGHTNESS_STEP_PERCENT = 5;
+const TFR_DEFAULT_BRIGHTNESS_PERCENT = 40;
+const TFR_BRIGHTNESS_STEP_PERCENT = 5;
 const COMPASS_DEFAULT_BRIGHTNESS_PERCENT = 80;
 const COMPASS_BRIGHTNESS_STEP_PERCENT = 5;
 const COMPASS_REFERENCE_INTENSITY = 140;
@@ -203,6 +244,15 @@ const VOL_DEFAULT_LEVEL = 0;
 const VOL_MIN_LEVEL = 0;
 const VOL_MAX_LEVEL = 10;
 const VOL_STEP_LEVEL = 1;
+const HISTORY_DOTS_DEFAULT_COUNT = 5;
+const HISTORY_DOTS_MIN_COUNT = 1;
+const HISTORY_DOTS_MAX_COUNT = 9;
+const HISTORY_DOTS_STEP_COUNT = 1;
+const HISTORY_RATE_DISPLAY = "4.5";
+const PTL_LENGTH_DEFAULT_MINUTES = 1.0;
+const PTL_LENGTH_MIN_MINUTES = 0.5;
+const PTL_LENGTH_MAX_MINUTES = 3.0;
+const PTL_LENGTH_STEP_MINUTES = 0.5;
 const CA_ALERT_AUDIO_PATH = "/public/audio/CA.mp3";
 const ERROR_ALERT_AUDIO_PATH = "/public/audio/ERROR.mp3";
 const RENDER_COMPASS_AND_DCB_ONLY = false;
@@ -223,6 +273,7 @@ const DATABLOCK_LEADER_LEVEL_1_PX = 15;
 const DATABLOCK_LEADER_LEVEL_STEP_PX = 10;
 const DATABLOCK_LEADER_ZERO_MARGIN_PX = 5;
 const WX_REFRESH_MS = 10_000;
+const TFR_REFRESH_MS = 60_000;
 const WX_HISTORY_FRAME_DURATION_MS = 5_000;
 const WX_STIPPLE_ZOOM_INTERACTION_GRACE_MS = 180;
 const WX_FETCH_MIN_RADIUS_NM = 50;
@@ -238,7 +289,18 @@ const RBL_LABEL_MIDPOINT_OFFSET_X_PX = 4;
 const RBL_LABEL_MIDPOINT_OFFSET_Y_PX = -4;
 const RBL_LABEL_AIRCRAFT_OFFSET_X_PX = 8;
 const RBL_LABEL_AIRCRAFT_OFFSET_Y_PX = 12;
+const MIN_SEPARATION_PARALLEL_TRACK_THRESHOLD_DEG = 12;
+const MIN_SEPARATION_RELATIVE_SPEED_EPS_NM_PER_MIN = 0.02;
+const MIN_SEPARATION_MAX_PREDICTION_MIN = 120;
+const MIN_SEPARATION_TRIANGLE_SIZE_PX = 6;
+const MIN_SEPARATION_TRIANGLE_NORTH_RAD = -Math.PI / 2;
+const MIN_SEPARATION_LABEL_GAP_PADDING_PX = 1;
 const UI_RENDER_TICK_MS = 250;
+const TFR_FIRST_DISPLAY_ID = 101;
+const TFR_BOUNDARY_LINE_WIDTH_PX = 1;
+const TFR_STIPPLE_ALPHA = 168;
+const TFR_LABEL_LINE_GAP_PX = 2;
+const TFR_LABEL_BLINK_HALF_CYCLE_MS = 500;
 const RADAR_SCOPE_CURSOR_FALLBACK = "crosshair";
 const NON_SCOPE_CURSOR = "default";
 const STARS_SPECIAL_CURSOR_WIDTH_PX = 17;
@@ -291,10 +353,22 @@ interface TraconAirportConfig {
   runways?: Record<string, TraconRunwayConfig>;
 }
 
+interface TraconSiteConfig {
+  label?: string;
+  name?: string;
+}
+
 interface TraconConfigPayload {
   videomaps?: string;
   mva?: string;
+  sites?: TraconSiteConfig[];
   airports?: Record<string, TraconAirportConfig>;
+}
+
+interface DcbSiteOption {
+  siteId: string;
+  top: string;
+  bottom: string;
 }
 
 type VideoMapLines = LatLon[][];
@@ -344,6 +418,15 @@ interface FlightRuleState {
   flightRules: string;
 }
 
+interface TowerListDisplayState {
+  airportIcao: string;
+  offsetPxX: number;
+  offsetPxY: number;
+  pinned: boolean;
+  visible: boolean;
+  maxAircraftRows: number;
+}
+
 interface AircraftHitTarget {
   id: string;
   x: number;
@@ -368,12 +451,80 @@ interface RangeBearingLine {
   end: RblEndpoint;
 }
 
+interface PredictedMinSeparationPair {
+  firstAircraftId: string;
+  secondAircraftId: string;
+}
+
 interface WxHistoryPlaybackFrame {
   frameNo: number;
   rows: number;
   cols: number;
   levels: number[];
 }
+
+interface TfrDisplayArea {
+  areaId: string | null;
+  points: LatLon[];
+}
+
+interface TfrDisplayRecord {
+  sourceId: string;
+  displayId: number;
+  localName: string;
+  areas: TfrDisplayArea[];
+}
+
+interface TfrTextState {
+  visible: boolean;
+  blink: boolean;
+  customText: string | null;
+}
+
+type F12TfrTextCommandState =
+  | {
+      stage: "collect-id";
+      idBuffer: string;
+    }
+  | {
+      stage: "await-action";
+      displayId: number;
+    }
+  | {
+      stage: "await-blink-enter";
+      displayId: number;
+    }
+  | {
+      stage: "collect-custom-text";
+      displayId: number;
+      textBuffer: string;
+    };
+
+interface AltitudeFilterRangeFt {
+  minFt: number;
+  maxFt: number;
+}
+
+interface AltitudeFilterConfig {
+  unassociated: AltitudeFilterRangeFt;
+  associated: AltitudeFilterRangeFt;
+}
+
+const DEFAULT_ALTITUDE_FILTER: AltitudeFilterConfig = {
+  unassociated: {
+    minFt: 100,
+    maxFt: 19_000
+  },
+  associated: {
+    minFt: 100,
+    maxFt: 19_000
+  }
+};
+
+const DEFAULT_DCB_SITE_OPTIONS: ReadonlyArray<DcbSiteOption> = [
+  { siteId: "MULTI", top: "MULTI", bottom: "" },
+  { siteId: "FUSED", top: "FUSED", bottom: "" }
+];
 
 function buildDcbMapsCategory(
   activeMapIds: Set<number>,
@@ -602,6 +753,88 @@ function buildDcbMapsMenu(
   };
 }
 
+function normalizeDcbSiteToken(raw: unknown, maxLength = 8): string {
+  if (typeof raw !== "string") {
+    return "";
+  }
+  return raw
+    .trim()
+    .toUpperCase()
+    .replace(/\s+/g, " ")
+    .replace(/[^A-Z0-9/ ]/g, "")
+    .slice(0, maxLength);
+}
+
+function normalizeSelectableSiteId(raw: unknown): "MULTI" | "FUSED" | null {
+  if (typeof raw !== "string") {
+    return null;
+  }
+  const normalized = raw.trim().toUpperCase();
+  if (normalized === "MULTI" || normalized === "FUSED") {
+    return normalized;
+  }
+  return null;
+}
+
+function buildDcbSiteOptionsFromTraconConfig(payload: TraconConfigPayload): DcbSiteOption[] {
+  const out: DcbSiteOption[] = [];
+  const seenIds = new Set<string>();
+  const configuredSites = Array.isArray(payload.sites) ? payload.sites : [];
+
+  for (const rawSite of configuredSites) {
+    if (!rawSite || typeof rawSite !== "object") {
+      continue;
+    }
+    const topRaw = normalizeDcbSiteToken(rawSite.label);
+    const bottomRaw = normalizeDcbSiteToken(rawSite.name);
+    const top = topRaw || bottomRaw;
+    const bottom = topRaw ? bottomRaw : "";
+    if (!top) {
+      continue;
+    }
+    const siteId = bottom ? `${top}_${bottom}` : top;
+    if (seenIds.has(siteId)) {
+      continue;
+    }
+    seenIds.add(siteId);
+    out.push({ siteId, top, bottom });
+  }
+
+  for (const defaultOption of DEFAULT_DCB_SITE_OPTIONS) {
+    const alreadyPresent = out.some((option) => option.top === defaultOption.top);
+    if (alreadyPresent) {
+      continue;
+    }
+    out.push({ ...defaultOption });
+  }
+
+  return out;
+}
+
+function buildDcbSiteMenuInput(
+  expanded: boolean,
+  doneFlashActive: boolean,
+  siteOptions: ReadonlyArray<DcbSiteOption>,
+  activeSiteId: string | null
+): DcbSiteMenuInput {
+  const buttons: DcbSiteMenuButton[] = siteOptions.map((site) => ({
+    siteId: site.siteId,
+    top: site.top,
+    bottom: site.bottom,
+    active: activeSiteId !== null && site.siteId === activeSiteId,
+    tone: "normal"
+  }));
+
+  return {
+    x: DCB_AUX_X_PX,
+    y: DCB_AUX_Y_PX,
+    expanded,
+    buttons,
+    doneActive: doneFlashActive,
+    doneTone: "normal"
+  };
+}
+
 function resolveMapsMenuFallbackControl(
   button: DcbMapsMenuButton | undefined
 ): { control: DcbMapsControlHit; mapId: number | null } {
@@ -732,6 +965,9 @@ function resolveBriteFallbackControl(
   if (top === "PRI") {
     return "brite-pri";
   }
+  if (top === "MPB") {
+    return "brite-mpb";
+  }
   if (top === "LST") {
     return "brite-lst";
   }
@@ -837,6 +1073,8 @@ function buildDcbBriteInput(
   dcbBrightnessAdjustMode: boolean,
   mapBrightnessPercent: number,
   mapBrightnessAdjustMode: boolean,
+  tfrBrightnessPercent: number,
+  tfrBrightnessAdjustMode: boolean,
   compassBrightnessPercent: number,
   compassBrightnessAdjustMode: boolean,
   listBrightnessPercent: number,
@@ -858,6 +1096,8 @@ function buildDcbBriteInput(
   const dcbBrightnessLabel = dcbBrightnessValue === 0 ? "OFF" : String(dcbBrightnessValue);
   const mapBrightnessValue = Math.max(0, Math.min(100, Math.round(mapBrightnessPercent)));
   const mapBrightnessLabel = mapBrightnessValue === 0 ? "OFF" : String(mapBrightnessValue);
+  const tfrBrightnessValue = Math.max(0, Math.min(100, Math.round(tfrBrightnessPercent)));
+  const tfrBrightnessLabel = tfrBrightnessValue === 0 ? "OFF" : String(tfrBrightnessValue);
   const compassBrightnessValue = Math.max(0, Math.min(100, Math.round(compassBrightnessPercent)));
   const compassBrightnessLabel = compassBrightnessValue === 0 ? "OFF" : String(compassBrightnessValue);
   const listBrightnessValue = Math.max(LIST_MIN_BRIGHTNESS_PERCENT, Math.min(100, Math.round(listBrightnessPercent)));
@@ -892,7 +1132,7 @@ function buildDcbBriteInput(
     ],
     bottomRow: [
       { top: "BKC", bottom: "OFF" },
-      { top: "MPB", bottom: "40" },
+      { top: "MPB", bottom: tfrBrightnessLabel, active: tfrBrightnessAdjustMode },
       { top: "LST", bottom: listBrightnessLabel, active: listBrightnessAdjustMode },
       { top: "LDB", bottom: "80" },
       { top: "TLS", bottom: toolsBrightnessLabel, active: toolsBrightnessAdjustMode },
@@ -925,19 +1165,39 @@ function listBrightnessPercentToRedColor(listBrightnessPercent: number): string 
 
 function listBrightnessPercentToSsaWxColor(listBrightnessPercent: number): string {
   const clampedPercent = Math.max(LIST_MIN_BRIGHTNESS_PERCENT, Math.min(100, Math.round(listBrightnessPercent)));
-  return scaleRgbCssColor(starsColors.DCB_WX_ACTIVE, clampedPercent, {
-    r: 116,
-    g: 116,
-    b: 162
+  return scaleRgbCssColor(starsColors.CYAN, clampedPercent, {
+    r: 0,
+    g: 255,
+    b: 255
   });
 }
 
 function toolsBrightnessPercentToColor(toolsBrightnessPercent: number): string {
-  return scaleRgbCssColor(starsColors.DIM_GRAY, toolsBrightnessPercent, {
-    r: 140,
-    g: 140,
-    b: 140
+  return scaleRgbCssColor(starsColors.WHITE, toolsBrightnessPercent, {
+    r: 255,
+    g: 255,
+    b: 255
   });
+}
+
+function ptlBrightnessPercentToColor(toolsBrightnessPercent: number): string {
+  return scaleRgbCssColor(starsColors.WHITE, toolsBrightnessPercent, {
+    r: 255,
+    g: 255,
+    b: 255
+  });
+}
+
+function clampPtlLengthMinutes(value: number): number {
+  if (!Number.isFinite(value)) {
+    return PTL_LENGTH_DEFAULT_MINUTES;
+  }
+  const rounded = Math.round(value * 2) / 2;
+  return Math.min(PTL_LENGTH_MAX_MINUTES, Math.max(PTL_LENGTH_MIN_MINUTES, rounded));
+}
+
+function formatPtlLengthMinutes(value: number): string {
+  return clampPtlLengthMinutes(value).toFixed(1);
 }
 
 function parseRgbCssColor(color: string): { r: number; g: number; b: number } | null {
@@ -1041,9 +1301,21 @@ function buildDcbAuxControlsInput(
   secondPage: boolean,
   volumeLevel: number,
   volumeAdjustMode: boolean,
-  shiftFlashActive: boolean
+  historyDotCount: number,
+  historyDotCountAdjustMode: boolean,
+  ptlLengthMinutes: number,
+  ptlLengthAdjustMode: boolean,
+  shiftFlashActive: boolean,
+  ssaFilterExpanded: boolean,
+  siteMenuExpanded: boolean,
+  selectedSiteId: "MULTI" | "FUSED"
 ): DcbAuxControlsInput {
   const safeVolumeLevel = Math.min(VOL_MAX_LEVEL, Math.max(VOL_MIN_LEVEL, Math.round(volumeLevel)));
+  const safeHistoryDotCount = Math.min(
+    HISTORY_DOTS_MAX_COUNT,
+    Math.max(HISTORY_DOTS_MIN_COUNT, Math.round(historyDotCount))
+  );
+  const safePtlLengthMinutes = clampPtlLengthMinutes(ptlLengthMinutes);
   if (secondPage) {
     return {
       x: DCB_MAPS_X_PX,
@@ -1052,6 +1324,15 @@ function buildDcbAuxControlsInput(
       volLabel: "VOL",
       volValue: String(safeVolumeLevel),
       volActive: volumeAdjustMode,
+      historyLabel: "HISTORY",
+      historyValue: String(safeHistoryDotCount),
+      historyActive: historyDotCountAdjustMode,
+      historyRateLabel: "H_RATE",
+      historyRateValue: HISTORY_RATE_DISPLAY,
+      ptlLabel: "PTL",
+      ptlSubLabel: "LNTH",
+      ptlValue: formatPtlLengthMinutes(safePtlLengthMinutes),
+      ptlActive: ptlLengthAdjustMode,
       shiftLabel: "SHIFT",
       shiftActive: shiftFlashActive
     };
@@ -1066,14 +1347,62 @@ function buildDcbAuxControlsInput(
     modeTop: "MODE",
     modeBottom: "FSL",
     siteMultiTop: "SITE",
-    siteMultiBottom: "MULTI",
+    siteMultiBottom: selectedSiteId,
+    siteMultiActive: siteMenuExpanded,
+    siteMultiTone: "normal",
     prefLabel: "PREF",
     ssaFilterTop: "SSA",
     ssaFilterBottom: "FILTER",
+    ssaFilterActive: ssaFilterExpanded,
     giTextFilterTop: "GI TEXT",
     giTextFilterBottom: "FILTER",
     shiftLabel: "SHIFT",
     shiftActive: shiftFlashActive
+  };
+}
+
+function buildDcbSsaFilterInput(
+  expanded: boolean,
+  doneFlashActive: boolean,
+  wxLineVisible: boolean,
+  statusLineVisible: boolean,
+  radarModeVisible: boolean,
+  timeVisible: boolean,
+  altimeterVisible: boolean,
+  altitudeFilterLineVisible: boolean
+): DcbSsaFilterInput {
+  return {
+    x: DCB_AUX_X_PX,
+    y: DCB_AUX_Y_PX,
+    expanded,
+    topRow: DCB_SSA_FILTER_MENU_TOP_ROW.map((button) => ({
+      top: button.top,
+      bottom: button.bottom,
+      active:
+        button.top.trim().toUpperCase() === "TIME"
+          ? timeVisible
+          : button.top.trim().toUpperCase() === "STATUS"
+            ? statusLineVisible
+            : button.top.trim().toUpperCase() === "RADAR"
+              ? radarModeVisible
+          : button.top.trim().toUpperCase() === "ALT FIL"
+            ? altitudeFilterLineVisible
+            : false,
+      tone: "normal"
+    })),
+    bottomRow: DCB_SSA_FILTER_MENU_BOTTOM_ROW.map((button) => ({
+      top: button.top,
+      bottom: button.bottom,
+      active:
+        button.top.trim().toUpperCase() === "WX"
+          ? wxLineVisible
+          : button.top.trim().toUpperCase() === "ALTSTG"
+            ? altimeterVisible
+            : false,
+      tone: "normal"
+    })),
+    doneActive: doneFlashActive,
+    doneTone: "normal"
   };
 }
 
@@ -1563,17 +1892,53 @@ function parseVideoMapsById(payload: unknown): Map<number, VideoMapLines> {
 }
 
 async function fetchTraconConfig(tracon: string): Promise<TraconConfigPayload> {
-  const url = `/data/configs/${tracon}.json`;
-  const response = await fetch(url, {
-    headers: {
-      accept: "application/json"
+  const candidateUrls = [
+    `/data/configs/${tracon}.json`,
+    `/.tauri-dist/data/configs/${tracon}.json`
+  ];
+  const loaded: TraconConfigPayload[] = [];
+  const errors: string[] = [];
+
+  for (const url of candidateUrls) {
+    try {
+      const response = await fetch(url, {
+        headers: {
+          accept: "application/json"
+        }
+      });
+      if (!response.ok) {
+        errors.push(`${url} -> HTTP ${response.status}`);
+        continue;
+      }
+      loaded.push((await response.json()) as TraconConfigPayload);
+    } catch (error) {
+      errors.push(`${url} -> ${error instanceof Error ? error.message : String(error)}`);
     }
-  });
-  if (!response.ok) {
-    throw new Error(`Failed to load TRACON config ${tracon}: HTTP ${response.status}`);
   }
 
-  return (await response.json()) as TraconConfigPayload;
+  if (loaded.length === 0) {
+    throw new Error(
+      `Failed to load TRACON config ${tracon}. Tried: ${errors.join("; ")}`
+    );
+  }
+
+  const primary = loaded[0];
+  const primaryHasSites = Array.isArray(primary.sites) && primary.sites.length > 0;
+  if (primaryHasSites) {
+    return primary;
+  }
+
+  const alternateWithSites = loaded.find(
+    (candidate) => Array.isArray(candidate.sites) && candidate.sites.length > 0
+  );
+  if (!alternateWithSites) {
+    return primary;
+  }
+
+  return {
+    ...primary,
+    sites: alternateWithSites.sites
+  };
 }
 
 function projectLatLonToScope(
@@ -1738,6 +2103,248 @@ function drawSelectedVideoMaps(
   ctx.restore();
 }
 
+function normalizeTfrLocalName(localName: string | null, fallbackId: string): string {
+  const normalized = (localName ?? "").trim().toUpperCase();
+  return normalized.length > 0 ? normalized : `TFR ${fallbackId}`;
+}
+
+function buildTfrDisplayRecords(payload: TfrsResponse): TfrDisplayRecord[] {
+  const sorted = [...payload.tfrs].sort((a, b) =>
+    a.id.localeCompare(b.id, undefined, { numeric: true, sensitivity: "base" })
+  );
+  const out: TfrDisplayRecord[] = [];
+  let nextDisplayId = TFR_FIRST_DISPLAY_ID;
+  for (let i = 0; i < sorted.length; i += 1) {
+    const item = sorted[i];
+    const areas: TfrDisplayArea[] = [];
+    for (let areaIndex = 0; areaIndex < item.areas.length; areaIndex += 1) {
+      const area = item.areas[areaIndex];
+      if (!Array.isArray(area.points) || area.points.length < 3) {
+        continue;
+      }
+      const points: LatLon[] = [];
+      for (let pointIndex = 0; pointIndex < area.points.length; pointIndex += 1) {
+        const point = area.points[pointIndex];
+        if (
+          !Number.isFinite(point.lat) ||
+          !Number.isFinite(point.lon) ||
+          Math.abs(point.lat) > 90 ||
+          Math.abs(point.lon) > 180
+        ) {
+          continue;
+        }
+        points.push({
+          lat: point.lat,
+          lon: point.lon
+        });
+      }
+      if (points.length < 3) {
+        continue;
+      }
+      areas.push({
+        areaId: area.areaId ?? null,
+        points
+      });
+    }
+    if (areas.length === 0) {
+      continue;
+    }
+    out.push({
+      sourceId: item.id,
+      displayId: nextDisplayId,
+      localName: normalizeTfrLocalName(item.localName, item.id),
+      areas
+    });
+    nextDisplayId += 1;
+  }
+  return out;
+}
+
+function findTfrByDisplayId(
+  tfrDisplayRecords: readonly TfrDisplayRecord[],
+  displayId: number
+): TfrDisplayRecord | null {
+  for (let i = 0; i < tfrDisplayRecords.length; i += 1) {
+    if (tfrDisplayRecords[i].displayId === displayId) {
+      return tfrDisplayRecords[i];
+    }
+  }
+  return null;
+}
+
+function computeTfrLabelAnchor(tfr: TfrDisplayRecord): LatLon | null {
+  let minLat = Number.POSITIVE_INFINITY;
+  let maxLat = Number.NEGATIVE_INFINITY;
+  let minLon = Number.POSITIVE_INFINITY;
+  let maxLon = Number.NEGATIVE_INFINITY;
+
+  for (let areaIndex = 0; areaIndex < tfr.areas.length; areaIndex += 1) {
+    const area = tfr.areas[areaIndex];
+    for (let pointIndex = 0; pointIndex < area.points.length; pointIndex += 1) {
+      const point = area.points[pointIndex];
+      if (point.lat < minLat) minLat = point.lat;
+      if (point.lat > maxLat) maxLat = point.lat;
+      if (point.lon < minLon) minLon = point.lon;
+      if (point.lon > maxLon) maxLon = point.lon;
+    }
+  }
+
+  if (
+    !Number.isFinite(minLat) ||
+    !Number.isFinite(maxLat) ||
+    !Number.isFinite(minLon) ||
+    !Number.isFinite(maxLon)
+  ) {
+    return null;
+  }
+
+  return {
+    lat: (minLat + maxLat) * 0.5,
+    lon: (minLon + maxLon) * 0.5
+  };
+}
+
+function getOrCreateTfrTextState(
+  tfrTextStateBySourceId: Map<string, TfrTextState>,
+  sourceId: string
+): TfrTextState {
+  let textState = tfrTextStateBySourceId.get(sourceId);
+  if (!textState) {
+    textState = {
+      visible: true,
+      blink: false,
+      customText: null
+    };
+    tfrTextStateBySourceId.set(sourceId, textState);
+  }
+  return textState;
+}
+
+function buildTfrOverlayLabelText(displayId: number, localName: string): string {
+  const prefix = `[${displayId}]`;
+  const nameWords = localName
+    .trim()
+    .split(/\s+/)
+    .filter((word) => word.length > 0);
+  if (nameWords.length === 0) {
+    return prefix;
+  }
+
+  const splitIndex = Math.max(1, Math.ceil(nameWords.length / 2));
+  const firstLineName = nameWords.slice(0, splitIndex).join(" ");
+  const secondLineName = nameWords.slice(splitIndex).join(" ");
+  if (secondLineName.length === 0) {
+    return `${prefix} ${firstLineName}`;
+  }
+  return `${prefix} ${firstLineName}\n${secondLineName}`;
+}
+
+function drawActiveTfrOverlays(
+  ctx: CanvasRenderingContext2D,
+  scopeRect: ScopeRect,
+  viewCenter: LatLon | null,
+  viewRadiusNm: number | null,
+  panOffsetPxX: number,
+  panOffsetPxY: number,
+  tfrDisplayRecords: readonly TfrDisplayRecord[],
+  activeTfrSourceIds: ReadonlySet<string>,
+  tfrTextStateBySourceId: ReadonlyMap<string, TfrTextState>,
+  tfrBlinkDimmed: boolean,
+  boundaryColor: string,
+  stipplePattern: CanvasPattern | null,
+  labelColor: string,
+  blinkLabelColor: string,
+  labelDrawer?: (
+    ctx: CanvasRenderingContext2D,
+    x: number,
+    y: number,
+    text: string,
+    color: string
+  ) => void
+): void {
+  if (!viewCenter || viewRadiusNm === null || viewRadiusNm <= 0) {
+    return;
+  }
+
+  const activeTfrs = tfrDisplayRecords.filter((tfr) => activeTfrSourceIds.has(tfr.sourceId));
+  if (activeTfrs.length === 0) {
+    return;
+  }
+
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(scopeRect.x, scopeRect.y, scopeRect.width, scopeRect.height);
+  ctx.clip();
+  ctx.strokeStyle = boundaryColor;
+  ctx.lineWidth = TFR_BOUNDARY_LINE_WIDTH_PX;
+
+  for (let i = 0; i < activeTfrs.length; i += 1) {
+    const tfr = activeTfrs[i];
+    const path = new Path2D();
+    let hasAnyPolygon = false;
+
+    for (let areaIndex = 0; areaIndex < tfr.areas.length; areaIndex += 1) {
+      const area = tfr.areas[areaIndex];
+      if (area.points.length < 3) {
+        continue;
+      }
+      const firstProjected = projectLatLonToScope(area.points[0], viewCenter, viewRadiusNm, scopeRect);
+      path.moveTo(firstProjected.x + panOffsetPxX, firstProjected.y + panOffsetPxY);
+      for (let pointIndex = 1; pointIndex < area.points.length; pointIndex += 1) {
+        const projected = projectLatLonToScope(area.points[pointIndex], viewCenter, viewRadiusNm, scopeRect);
+        path.lineTo(projected.x + panOffsetPxX, projected.y + panOffsetPxY);
+      }
+      path.closePath();
+      hasAnyPolygon = true;
+    }
+
+    if (!hasAnyPolygon) {
+      continue;
+    }
+
+    if (stipplePattern) {
+      ctx.fillStyle = stipplePattern;
+      ctx.fill(path);
+    }
+    ctx.stroke(path);
+
+    const labelAnchor = computeTfrLabelAnchor(tfr);
+    if (!labelAnchor) {
+      continue;
+    }
+    const projectedAnchor = projectLatLonToScope(labelAnchor, viewCenter, viewRadiusNm, scopeRect);
+    const labelX = Math.round(projectedAnchor.x + panOffsetPxX);
+    const labelY = Math.round(projectedAnchor.y + panOffsetPxY);
+    const textState = tfrTextStateBySourceId.get(tfr.sourceId);
+    const textVisible = textState?.visible ?? true;
+    const textBlinking = textState?.blink ?? false;
+    if (!textVisible) {
+      continue;
+    }
+    const resolvedLabelColor = textBlinking && tfrBlinkDimmed ? blinkLabelColor : labelColor;
+    const textSource =
+      textState?.customText && textState.customText.trim().length > 0
+        ? textState.customText
+        : tfr.localName;
+    const labelText = buildTfrOverlayLabelText(tfr.displayId, textSource);
+
+    if (labelDrawer) {
+      labelDrawer(ctx, labelX, labelY, labelText, resolvedLabelColor);
+    } else {
+      ctx.fillStyle = resolvedLabelColor;
+      ctx.textAlign = "center";
+      ctx.textBaseline = "alphabetic";
+      ctx.font = "12px monospace";
+      const lines = labelText.split("\n");
+      const startY = labelY - ((lines.length - 1) * (12 + TFR_LABEL_LINE_GAP_PX)) / 2;
+      for (let lineIndex = 0; lineIndex < lines.length; lineIndex += 1) {
+        ctx.fillText(lines[lineIndex], labelX, Math.round(startY + lineIndex * (12 + TFR_LABEL_LINE_GAP_PX)));
+      }
+    }
+  }
+  ctx.restore();
+}
+
 function clampVideoMapRange(rangeNm: number): number {
   return Math.min(VIDEO_MAP_MAX_RANGE_NM, Math.max(VIDEO_MAP_MIN_RANGE_NM, rangeNm));
 }
@@ -1791,6 +2398,68 @@ function pointInScopeRect(
     x <= scopeRect.x + scopeRect.width &&
     y <= scopeRect.y + scopeRect.height
   );
+}
+
+function toDmsNoHemisphere(value: number, degreeWidth = 3): string {
+  const absolute = Math.abs(value);
+  let degrees = Math.floor(absolute);
+  const minutesFloat = (absolute - degrees) * 60;
+  let minutes = Math.floor(minutesFloat);
+  let seconds = Math.round((minutesFloat - minutes) * 60);
+
+  if (seconds >= 60) {
+    seconds = 0;
+    minutes += 1;
+  }
+  if (minutes >= 60) {
+    minutes = 0;
+    degrees += 1;
+  }
+
+  return `${String(degrees).padStart(degreeWidth, "0")} ${String(minutes).padStart(2, "0")} ${String(seconds).padStart(2, "0")}`;
+}
+
+function formatPreviewCoordinate(lat: number, lon: number): string {
+  return `${toDmsNoHemisphere(lat, 3)} / ${toDmsNoHemisphere(lon, 3)}`;
+}
+
+function isModifierOnlyKey(event: KeyboardEvent): boolean {
+  return (
+    event.key === "Shift" ||
+    event.key === "Control" ||
+    event.key === "Alt" ||
+    event.key === "Meta" ||
+    event.key === "AltGraph"
+  );
+}
+
+function isAsteriskCommandKey(event: KeyboardEvent): boolean {
+  if (event.key === "*" || event.key === "×") {
+    return true;
+  }
+  if (event.code === "NumpadMultiply") {
+    return true;
+  }
+  // Some layouts emit "+" while Shift is held for the same physical key used to type "*".
+  if (event.shiftKey && event.key === "+") {
+    return true;
+  }
+  return false;
+}
+
+function isBackslashCommandKey(event: KeyboardEvent): boolean {
+  if (event.key === "\\") {
+    return true;
+  }
+  // Layout fallback: some keyboards emit "\" using modifier combinations.
+  return event.code === "Backslash" || event.code === "IntlBackslash";
+}
+
+function isPrintableCommandKey(event: KeyboardEvent): boolean {
+  if (event.ctrlKey || event.metaKey || event.altKey) {
+    return false;
+  }
+  return event.key.length === 1;
 }
 
 function buildBitmapCursorCss(options: {
@@ -1888,6 +2557,373 @@ function formatBearingLabel(headingDeg: number): string {
   return String(heading).padStart(3, "0");
 }
 
+function headingDifferenceDeg(aDeg: number, bDeg: number): number {
+  const a = normalizeHeadingDeg(aDeg);
+  const b = normalizeHeadingDeg(bDeg);
+  const diff = Math.abs(a - b);
+  return diff > 180 ? 360 - diff : diff;
+}
+
+function resolveVelocityNmPerMin(trackDeg: number, groundspeedKts: number): { x: number; y: number } {
+  const unit = headingToUnitVector(normalizeHeadingDeg(trackDeg));
+  const speedNmPerMin = groundspeedKts / 60;
+  return {
+    x: unit.x * speedNmPerMin,
+    y: unit.y * speedNmPerMin
+  };
+}
+
+interface PredictedMinSeparationOverlay {
+  mode: "cpa" | "no-crossing";
+  currentPointA: { x: number; y: number };
+  currentPointB: { x: number; y: number };
+  pointA: { x: number; y: number };
+  pointB: { x: number; y: number };
+  labelLines: string[];
+}
+
+function resolvePredictedMinSeparationOverlay(
+  pair: PredictedMinSeparationPair,
+  aircraftById: ReadonlyMap<string, AircraftFeedItem>,
+  scopeRect: ScopeRect,
+  center: LatLon,
+  radiusNm: number,
+  panOffsetPxX: number,
+  panOffsetPxY: number
+): PredictedMinSeparationOverlay | null {
+  const first = aircraftById.get(pair.firstAircraftId);
+  const second = aircraftById.get(pair.secondAircraftId);
+  if (!first || !second) {
+    return null;
+  }
+
+  const projectedFirst = projectLatLonToScope(
+    { lat: first.position.lat, lon: first.position.lon },
+    center,
+    radiusNm,
+    scopeRect
+  );
+  const projectedSecond = projectLatLonToScope(
+    { lat: second.position.lat, lon: second.position.lon },
+    center,
+    radiusNm,
+    scopeRect
+  );
+  const firstCurrentPx = {
+    x: projectedFirst.x + panOffsetPxX,
+    y: projectedFirst.y + panOffsetPxY
+  };
+  const secondCurrentPx = {
+    x: projectedSecond.x + panOffsetPxX,
+    y: projectedSecond.y + panOffsetPxY
+  };
+
+  const currentDistanceNm = distanceNmBetween(
+    { lat: first.position.lat, lon: first.position.lon },
+    { lat: second.position.lat, lon: second.position.lon }
+  );
+
+  const trackA = first.trackDeg;
+  const trackB = second.trackDeg;
+  const speedA = first.groundspeedKts;
+  const speedB = second.groundspeedKts;
+  const hasValidMotion =
+    trackA !== null &&
+    Number.isFinite(trackA) &&
+    trackB !== null &&
+    Number.isFinite(trackB) &&
+    speedA !== null &&
+    Number.isFinite(speedA) &&
+    speedA > 0 &&
+    speedB !== null &&
+    Number.isFinite(speedB) &&
+    speedB > 0;
+
+  if (!hasValidMotion) {
+    return {
+      mode: "no-crossing",
+      currentPointA: firstCurrentPx,
+      currentPointB: secondCurrentPx,
+      pointA: firstCurrentPx,
+      pointB: secondCurrentPx,
+      labelLines: ["NO X-ING", `${currentDistanceNm.toFixed(2)}NM`]
+    };
+  }
+
+  if (headingDifferenceDeg(trackA, trackB) <= MIN_SEPARATION_PARALLEL_TRACK_THRESHOLD_DEG) {
+    return {
+      mode: "no-crossing",
+      currentPointA: firstCurrentPx,
+      currentPointB: secondCurrentPx,
+      pointA: firstCurrentPx,
+      pointB: secondCurrentPx,
+      labelLines: ["NO X-ING", `${currentDistanceNm.toFixed(2)}NM`]
+    };
+  }
+
+  const secondRelativeNm = projectOffsetNm(
+    { lat: second.position.lat, lon: second.position.lon },
+    { lat: first.position.lat, lon: first.position.lon }
+  );
+  const velocityFirstNmPerMin = resolveVelocityNmPerMin(trackA, speedA);
+  const velocitySecondNmPerMin = resolveVelocityNmPerMin(trackB, speedB);
+  const relativeVelocityNmPerMin = {
+    x: velocitySecondNmPerMin.x - velocityFirstNmPerMin.x,
+    y: velocitySecondNmPerMin.y - velocityFirstNmPerMin.y
+  };
+  const relativeVelocitySq =
+    relativeVelocityNmPerMin.x * relativeVelocityNmPerMin.x +
+    relativeVelocityNmPerMin.y * relativeVelocityNmPerMin.y;
+
+  if (relativeVelocitySq < MIN_SEPARATION_RELATIVE_SPEED_EPS_NM_PER_MIN ** 2) {
+    return {
+      mode: "no-crossing",
+      currentPointA: firstCurrentPx,
+      currentPointB: secondCurrentPx,
+      pointA: firstCurrentPx,
+      pointB: secondCurrentPx,
+      labelLines: ["NO X-ING", `${currentDistanceNm.toFixed(2)}NM`]
+    };
+  }
+
+  const closestTimeMinRaw =
+    -(
+      secondRelativeNm.x * relativeVelocityNmPerMin.x +
+      secondRelativeNm.y * relativeVelocityNmPerMin.y
+    ) / relativeVelocitySq;
+  if (!Number.isFinite(closestTimeMinRaw) || closestTimeMinRaw <= 0) {
+    return {
+      mode: "no-crossing",
+      currentPointA: firstCurrentPx,
+      currentPointB: secondCurrentPx,
+      pointA: firstCurrentPx,
+      pointB: secondCurrentPx,
+      labelLines: ["NO X-ING", `${currentDistanceNm.toFixed(2)}NM`]
+    };
+  }
+  const closestTimeMin = Math.min(MIN_SEPARATION_MAX_PREDICTION_MIN, closestTimeMinRaw);
+
+  const pixelsPerNm = Math.min(scopeRect.width, scopeRect.height) / (2 * radiusNm);
+  const firstCpaPx = {
+    x: firstCurrentPx.x + velocityFirstNmPerMin.x * closestTimeMin * pixelsPerNm,
+    y: firstCurrentPx.y - velocityFirstNmPerMin.y * closestTimeMin * pixelsPerNm
+  };
+  const secondCpaPx = {
+    x: secondCurrentPx.x + velocitySecondNmPerMin.x * closestTimeMin * pixelsPerNm,
+    y: secondCurrentPx.y - velocitySecondNmPerMin.y * closestTimeMin * pixelsPerNm
+  };
+
+  const relativeAtClosestNm = {
+    x: secondRelativeNm.x + relativeVelocityNmPerMin.x * closestTimeMin,
+    y: secondRelativeNm.y + relativeVelocityNmPerMin.y * closestTimeMin
+  };
+  const minDistanceNm = Math.hypot(relativeAtClosestNm.x, relativeAtClosestNm.y);
+
+  return {
+    mode: "cpa",
+    currentPointA: firstCurrentPx,
+    currentPointB: secondCurrentPx,
+    pointA: firstCpaPx,
+    pointB: secondCpaPx,
+    labelLines: [`${minDistanceNm.toFixed(2)}NM`]
+  };
+}
+
+function drawOrientedTriangleMarker(
+  ctx: CanvasRenderingContext2D,
+  centerX: number,
+  centerY: number,
+  directionRad: number,
+  color: string
+): void {
+  // Build an equilateral triangle around the marker center.
+  const radius = MIN_SEPARATION_TRIANGLE_SIZE_PX;
+  const angleA = directionRad;
+  const angleB = directionRad + (2 * Math.PI) / 3;
+  const angleC = directionRad - (2 * Math.PI) / 3;
+  const ax = centerX + Math.cos(angleA) * radius;
+  const ay = centerY + Math.sin(angleA) * radius;
+  const bx = centerX + Math.cos(angleB) * radius;
+  const by = centerY + Math.sin(angleB) * radius;
+  const cx = centerX + Math.cos(angleC) * radius;
+  const cy = centerY + Math.sin(angleC) * radius;
+
+  ctx.fillStyle = color;
+  ctx.beginPath();
+  ctx.moveTo(ax, ay);
+  ctx.lineTo(bx, by);
+  ctx.lineTo(cx, cy);
+  ctx.closePath();
+  ctx.fill();
+}
+
+function drawPredictedMinSeparationOverlay(
+  ctx: CanvasRenderingContext2D,
+  overlay: PredictedMinSeparationOverlay,
+  toolsColor: string,
+  lineHeightPx: number,
+  labelDrawer?: (
+    ctx: CanvasRenderingContext2D,
+    x: number,
+    y: number,
+    text: string,
+    color: string
+  ) => void,
+  labelTextMeasurer?: (text: string) => number
+): void {
+  const measuredLineWidths = overlay.labelLines.map((lineText) => {
+    if (labelTextMeasurer) {
+      return Math.max(0, labelTextMeasurer(lineText));
+    }
+    ctx.font = RBL_LABEL_FONT;
+    return Math.max(0, ctx.measureText(lineText).width);
+  });
+  const maxLineWidthPx =
+    measuredLineWidths.length > 0
+      ? measuredLineWidths.reduce((maxWidth, width) => Math.max(maxWidth, width), 0)
+      : 0;
+
+  const midpointX = (overlay.pointA.x + overlay.pointB.x) * 0.5;
+  const midpointY = (overlay.pointA.y + overlay.pointB.y) * 0.5;
+  const labelStartY = Math.round(
+    midpointY - ((overlay.labelLines.length - 1) * lineHeightPx) / 2
+  );
+  const labelRect = {
+    left: midpointX - maxLineWidthPx * 0.5,
+    right: midpointX + maxLineWidthPx * 0.5,
+    top: labelStartY,
+    bottom: labelStartY + overlay.labelLines.length * lineHeightPx
+  };
+
+  ctx.strokeStyle = toolsColor;
+  ctx.lineWidth = 1;
+
+  const drawSegmentWithLabelGap = (
+    startX: number,
+    startY: number,
+    endX: number,
+    endY: number
+  ): void => {
+    const dx = endX - startX;
+    const dy = endY - startY;
+    const segmentLengthPx = Math.hypot(dx, dy);
+    if (segmentLengthPx <= 0) {
+      return;
+    }
+
+    // Clip the center segment exactly around the label box so the line does not cross text.
+    const p = [-dx, dx, -dy, dy];
+    const q = [
+      startX - labelRect.left,
+      labelRect.right - startX,
+      startY - labelRect.top,
+      labelRect.bottom - startY
+    ];
+    let tEnter = 0;
+    let tExit = 1;
+    for (let i = 0; i < p.length; i += 1) {
+      const pi = p[i];
+      const qi = q[i];
+      if (Math.abs(pi) < 1e-9) {
+        if (qi < 0) {
+          tEnter = 2;
+          tExit = -1;
+          break;
+        }
+        continue;
+      }
+      const ratio = qi / pi;
+      if (pi < 0) {
+        tEnter = Math.max(tEnter, ratio);
+      } else {
+        tExit = Math.min(tExit, ratio);
+      }
+      if (tEnter > tExit) {
+        break;
+      }
+    }
+
+    if (tEnter > tExit || tExit < 0 || tEnter > 1) {
+      ctx.beginPath();
+      ctx.moveTo(startX, startY);
+      ctx.lineTo(endX, endY);
+      ctx.stroke();
+      return;
+    }
+
+    const paddingT = MIN_SEPARATION_LABEL_GAP_PADDING_PX / segmentLengthPx;
+    const firstEndT = Math.max(0, Math.min(1, tEnter - paddingT));
+    const secondStartT = Math.max(0, Math.min(1, tExit + paddingT));
+    const firstEndX = startX + dx * firstEndT;
+    const firstEndY = startY + dy * firstEndT;
+    const secondStartX = startX + dx * secondStartT;
+    const secondStartY = startY + dy * secondStartT;
+
+    ctx.beginPath();
+    if (firstEndT > 0) {
+      ctx.moveTo(startX, startY);
+      ctx.lineTo(firstEndX, firstEndY);
+    }
+    if (secondStartT < 1) {
+      ctx.moveTo(secondStartX, secondStartY);
+      ctx.lineTo(endX, endY);
+    }
+    ctx.stroke();
+  };
+
+  if (overlay.mode === "cpa") {
+    drawSegmentWithLabelGap(
+      overlay.pointA.x,
+      overlay.pointA.y,
+      overlay.pointB.x,
+      overlay.pointB.y
+    );
+
+    ctx.beginPath();
+    ctx.moveTo(overlay.currentPointA.x, overlay.currentPointA.y);
+    ctx.lineTo(overlay.pointA.x, overlay.pointA.y);
+    ctx.moveTo(overlay.currentPointB.x, overlay.currentPointB.y);
+    ctx.lineTo(overlay.pointB.x, overlay.pointB.y);
+    ctx.stroke();
+
+    drawOrientedTriangleMarker(
+      ctx,
+      overlay.pointA.x,
+      overlay.pointA.y,
+      MIN_SEPARATION_TRIANGLE_NORTH_RAD,
+      toolsColor
+    );
+    drawOrientedTriangleMarker(
+      ctx,
+      overlay.pointB.x,
+      overlay.pointB.y,
+      MIN_SEPARATION_TRIANGLE_NORTH_RAD,
+      toolsColor
+    );
+  } else {
+    drawSegmentWithLabelGap(
+      overlay.pointA.x,
+      overlay.pointA.y,
+      overlay.pointB.x,
+      overlay.pointB.y
+    );
+  }
+
+  for (let i = 0; i < overlay.labelLines.length; i += 1) {
+    const lineText = overlay.labelLines[i];
+    const lineY = labelStartY + i * lineHeightPx;
+    const lineWidthPx = measuredLineWidths[i] ?? 0;
+    const lineX = Math.round(midpointX - lineWidthPx * 0.5);
+    if (labelDrawer) {
+      labelDrawer(ctx, lineX, lineY, lineText, toolsColor);
+    } else {
+      ctx.fillStyle = toolsColor;
+      ctx.font = RBL_LABEL_FONT;
+      ctx.fillText(lineText, lineX, lineY);
+    }
+  }
+}
+
 function resolveRblEndpointLatLon(
   endpoint: RblEndpoint,
   aircraftById: ReadonlyMap<string, AircraftFeedItem>
@@ -1922,6 +2958,7 @@ function drawRangeBearingLines(
   lines: readonly RangeBearingLine[],
   aircraftById: ReadonlyMap<string, AircraftFeedItem>,
   toolsColor: string,
+  lineNumberStart = 1,
   labelDrawer?: (
     ctx: CanvasRenderingContext2D,
     x: number,
@@ -1967,7 +3004,7 @@ function drawRangeBearingLines(
 
     const distanceNm = distanceNmBetween(start, end);
     const headingDeg = bearingDegBetween(start, end);
-    const label = `${formatBearingLabel(headingDeg)}/${distanceNm.toFixed(2)}-${i + 1}`;
+    const label = `${formatBearingLabel(headingDeg)}/${distanceNm.toFixed(2)}-${lineNumberStart + i}`;
     const startIsAircraft = line.start.kind === "aircraft";
     const endIsAircraft = line.end.kind === "aircraft";
 
@@ -2074,6 +3111,111 @@ function normalizeBeaconCode(raw: unknown): string | null {
   return beaconCode || null;
 }
 
+function normalizeIcaoCode(raw: unknown): string | null {
+  if (typeof raw !== "string") {
+    return null;
+  }
+  const icao = raw.trim().toUpperCase();
+  if (!icao) {
+    return null;
+  }
+  return /^[A-Z0-9]{4}$/.test(icao) ? icao : null;
+}
+
+function normalizeControllerPositionCode(raw: unknown): string | null {
+  if (typeof raw !== "string") {
+    return null;
+  }
+  const normalized = raw.trim().toUpperCase();
+  return normalized.length > 0 ? normalized : null;
+}
+
+function parseAltitudeFilterTokenToFt(token: string): number | null {
+  const normalized = token.trim().toUpperCase();
+  if (normalized === "N99") {
+    return 0;
+  }
+  if (!/^[0-9]{3}$/.test(normalized)) {
+    return null;
+  }
+  const parsedHundreds = Number.parseInt(normalized, 10);
+  if (!Number.isFinite(parsedHundreds) || parsedHundreds < 0) {
+    return null;
+  }
+  return parsedHundreds * 100;
+}
+
+function parseAltitudeFilterConfigFromBuffer(buffer: string): AltitudeFilterConfig | null {
+  const compact = buffer.toUpperCase().replace(/\s+/g, "");
+  if (compact.length !== 12) {
+    return null;
+  }
+  const tokens = [
+    compact.slice(0, 3),
+    compact.slice(3, 6),
+    compact.slice(6, 9),
+    compact.slice(9, 12)
+  ];
+  const parsedFt = tokens.map(parseAltitudeFilterTokenToFt);
+  if (parsedFt.some((value) => value === null)) {
+    return null;
+  }
+  const [unassociatedMinRaw, unassociatedMaxRaw, associatedMinRaw, associatedMaxRaw] = parsedFt as number[];
+  return {
+    unassociated: {
+      minFt: Math.min(unassociatedMinRaw, unassociatedMaxRaw),
+      maxFt: Math.max(unassociatedMinRaw, unassociatedMaxRaw)
+    },
+    associated: {
+      minFt: Math.min(associatedMinRaw, associatedMaxRaw),
+      maxFt: Math.max(associatedMinRaw, associatedMaxRaw)
+    }
+  };
+}
+
+function formatAltitudeFilterTokenFromFt(altitudeFt: number): string {
+  if (!Number.isFinite(altitudeFt) || altitudeFt <= 0) {
+    return "N99";
+  }
+  const hundreds = Math.max(0, Math.round(altitudeFt / 100));
+  return String(hundreds).padStart(3, "0");
+}
+
+function formatAltitudeFilterLine(config: AltitudeFilterConfig | null): string {
+  const resolved = config ?? DEFAULT_ALTITUDE_FILTER;
+  return [
+    formatAltitudeFilterTokenFromFt(resolved.unassociated.minFt),
+    formatAltitudeFilterTokenFromFt(resolved.unassociated.maxFt),
+    "U",
+    formatAltitudeFilterTokenFromFt(resolved.associated.minFt),
+    formatAltitudeFilterTokenFromFt(resolved.associated.maxFt),
+    "A"
+  ].join(" ");
+}
+
+function formatTowerAirportIata(airportIcao: string): string {
+  const normalized = normalizeIcaoCode(airportIcao);
+  if (!normalized) {
+    return "";
+  }
+  return normalized.startsWith("K") ? normalized.slice(1) : normalized;
+}
+
+function destinationMatchesTowerAirport(
+  destination: string | null,
+  towerAirportIcao: string
+): boolean {
+  if (!destination) {
+    return false;
+  }
+  const normalizedAirportIcao = normalizeIcaoCode(towerAirportIcao);
+  if (!normalizedAirportIcao) {
+    return false;
+  }
+  const towerAirportIata = formatTowerAirportIata(normalizedAirportIcao);
+  return destination === towerAirportIata || destination === normalizedAirportIcao;
+}
+
 function chooseRandomUniqueTlIndex(used: Set<string>): string | null {
   const available: string[] = [];
   for (let i = VFR_TL_INDEX_MIN; i <= VFR_TL_INDEX_MAX; i += 1) {
@@ -2178,12 +3320,35 @@ function StarsApp(): ReturnType<typeof createElement> {
         const visualViewport = window.visualViewport ?? null;
         let resizeObserver: ResizeObserver | null = null;
         let ssaQnhInHg: number | null = null;
+        let ssaMainAirportIcao = SSA_AIRPORT_ICAO;
+        let controlPositionId =
+          normalizeControllerPositionCode(CONTROL_POSITION_ID) ?? CONTROL_POSITION_ID;
         let ssaQnhStations: Array<{ airportIcao: string; qnhInHg: number | null }> = [];
-        let towerInboundAircraft: Array<{
-          callsign: string | null;
-          aircraftTypeIcao: string | null;
-        }> = [];
+        let towerInboundAircraftByIcao = new Map<
+          string,
+          Array<{
+            callsign: string | null;
+            aircraftTypeIcao: string | null;
+          }>
+        >();
+        let towerAirportOrderIcaos: string[] = [TOWER_LIST_AIRPORT_ICAO_NORMALIZED];
+        let selectedTowerAirportIcao = TOWER_LIST_AIRPORT_ICAO_NORMALIZED;
+        let towerListAircraftRows = 5;
+        const towerListDisplaysByAirport = new Map<string, TowerListDisplayState>([
+          [
+            selectedTowerAirportIcao,
+            {
+              airportIcao: selectedTowerAirportIcao,
+              offsetPxX: SSA_MARGIN_LEFT_PX,
+              offsetPxY: 0,
+              pinned: false,
+              visible: true,
+              maxAircraftRows: towerListAircraftRows
+            }
+          ]
+        ]);
         let towerAirportRef: LatLon | null = null;
+        let towerAirportRefsByIcao = new Map<string, LatLon>();
         let videoMapCenterRef: LatLon | null = null;
         let videoMapHomeCenterRef: LatLon | null = null;
         let videoMapsById = new Map<number, VideoMapLines>();
@@ -2210,11 +3375,29 @@ function StarsApp(): ReturnType<typeof createElement> {
         let mapsClearAllFlashTimer: number | null = null;
         let briteDoneFlashActive = false;
         let briteDoneFlashTimer: number | null = null;
+        let ssaFilterDoneFlashActive = false;
+        let ssaFilterDoneFlashTimer: number | null = null;
+        let siteMenuDoneFlashActive = false;
+        let siteMenuDoneFlashTimer: number | null = null;
         let shiftFlashActive = false;
         let shiftFlashTimer: number | null = null;
         let dcbAuxSecondPage = false;
         let volLevel = VOL_DEFAULT_LEVEL;
         let volAdjustMode = false;
+        let historyDotCount = HISTORY_DOTS_DEFAULT_COUNT;
+        let historyDotCountAdjustMode = false;
+        let ptlLengthMinutes = PTL_LENGTH_DEFAULT_MINUTES;
+        let ptlLengthAdjustMode = false;
+        let ssaFilterExpanded = false;
+        let siteMenuExpanded = false;
+        let ssaFilterWxLineVisible = true;
+        let ssaFilterStatusLineVisible = true;
+        let ssaFilterRadarModeVisible = true;
+        let ssaFilterTimeVisible = true;
+        let ssaFilterAltimeterVisible = true;
+        let ssaFilterAltitudeFilterLineVisible = true;
+        let dcbSiteOptions: DcbSiteOption[] = DEFAULT_DCB_SITE_OPTIONS.map((site) => ({ ...site }));
+        let activeDcbSiteId: string = DEFAULT_DCB_SITE_OPTIONS[0]?.siteId ?? "MULTI";
         let mapsExpanded = false;
         let currentMapsListVisible = false;
         let briteExpanded = false;
@@ -2224,6 +3407,8 @@ function StarsApp(): ReturnType<typeof createElement> {
         let dcbBrightnessAdjustMode = false;
         let mapBrightnessPercent = VIDEO_MAP_DEFAULT_BRIGHTNESS_PERCENT;
         let mapBrightnessAdjustMode = false;
+        let tfrBrightnessPercent = TFR_DEFAULT_BRIGHTNESS_PERCENT;
+        let tfrBrightnessAdjustMode = false;
         let compassBrightnessPercent = COMPASS_DEFAULT_BRIGHTNESS_PERCENT;
         let compassBrightnessAdjustMode = false;
         let listBrightnessPercent = LIST_DEFAULT_BRIGHTNESS_PERCENT;
@@ -2244,11 +3429,14 @@ function StarsApp(): ReturnType<typeof createElement> {
         let rrBrightnessWheelAccumulatorPx = 0;
         let dcbBrightnessWheelAccumulatorPx = 0;
         let mapBrightnessWheelAccumulatorPx = 0;
+        let tfrBrightnessWheelAccumulatorPx = 0;
         let compassBrightnessWheelAccumulatorPx = 0;
         let listBrightnessWheelAccumulatorPx = 0;
         let toolsBrightnessWheelAccumulatorPx = 0;
         let blipBrightnessWheelAccumulatorPx = 0;
         let historyBrightnessWheelAccumulatorPx = 0;
+        let historyDotCountWheelAccumulatorPx = 0;
+        let ptlLengthWheelAccumulatorPx = 0;
         let wxBrightnessWheelAccumulatorPx = 0;
         let wxStippleBrightnessWheelAccumulatorPx = 0;
         let volWheelAccumulatorPx = 0;
@@ -2258,6 +3446,8 @@ function StarsApp(): ReturnType<typeof createElement> {
         const activeMapIds = new Set<number>();
         const activeWxLevels = new Set<number>();
         const wxLevelsAvailable = new Set<number>();
+        const activeTfrSourceIds = new Set<string>();
+        const tfrTextStateBySourceId = new Map<string, TfrTextState>();
         let wxRadar: WxReflectivityResponse | null = null;
         let wxHistoryPlaybackRadar: WxReflectivityResponse | null = null;
         let wxHistoryPlaybackFrames: WxHistoryPlaybackFrame[] = [];
@@ -2267,12 +3457,27 @@ function StarsApp(): ReturnType<typeof createElement> {
         let wxZoomInteractionActive = false;
         let wxZoomInteractionTimer: number | null = null;
         let wxRefreshInFlight = false;
+        let tfrDisplayRecords: TfrDisplayRecord[] = [];
         let coastSuspendCallsigns: string[] = [];
         let laCaMciConflictAlerts: string[] = [];
         let activeCaAlertLabels = new Set<string>();
         let displayedAircraft: AircraftFeedItem[] = [];
         let tcpByCallsign = new Map<string, string>();
+        const ptlEnabledAircraftIds = new Set<string>();
         const expandedDatablockAircraftIds = new Set<string>();
+        const cyanHighlightedAircraftIds = new Set<string>();
+        let activeAltitudeFilter: AltitudeFilterConfig | null = {
+          unassociated: {
+            minFt: DEFAULT_ALTITUDE_FILTER.unassociated.minFt,
+            maxFt: DEFAULT_ALTITUDE_FILTER.unassociated.maxFt
+          },
+          associated: {
+            minFt: DEFAULT_ALTITUDE_FILTER.associated.minFt,
+            maxFt: DEFAULT_ALTITUDE_FILTER.associated.maxFt
+          }
+        };
+        const altitudeFilteredAircraftIds = new Set<string>();
+        const altitudeFilterManualRevealAircraftIds = new Set<string>();
         let datablockHitRegions: DatablockHitRegion[] = [];
         let mvaSectors: MvaSector[] = [];
         let approachExemptionCorridors: ApproachExemptionCorridor[] = [];
@@ -2287,12 +3492,12 @@ function StarsApp(): ReturnType<typeof createElement> {
         let rblFirstSelection: RblEndpoint | null = null;
         let rblSecondSelection: RblEndpoint | null = null;
         let rblDeleteIndexBuffer = "";
+        let rblPreviewCursorPx: { x: number; y: number } | null = null;
+        let predictedMinSepCommandActive = false;
+        let predictedMinSepFirstAircraftId: string | null = null;
+        let predictedMinSepPair: PredictedMinSeparationPair | null = null;
         let ssaListOffsetPxX = SSA_MARGIN_LEFT_PX;
         let ssaListOffsetPxY = SSA_MARGIN_TOP_PX;
-        let towerListVisible = true;
-        let towerListOffsetPxX = SSA_MARGIN_LEFT_PX;
-        let towerListOffsetPxY = 0;
-        let towerListPinned = false;
         let signOnListVisible = true;
         let signOnListOffsetPxX = 0;
         let signOnListOffsetPxY = 0;
@@ -2313,22 +3518,44 @@ function StarsApp(): ReturnType<typeof createElement> {
         let vfrListOffsetPxX = SSA_MARGIN_LEFT_PX;
         let vfrListOffsetPxY = 0;
         let vfrListPinned = false;
+        let geoRestrictionsListVisible = false;
+        let geoRestrictionsListOffsetPxX = 0;
+        let geoRestrictionsListOffsetPxY = 0;
+        let geoRestrictionsListPinned = false;
         let f7CommandArmed = false;
+        let f7CoordCommandPending = false;
+        let f7GeoRestrictionsCommandPending = false;
         let f7WxCommandPending = false;
         let f7WxHistoryConfirmPending = false;
+        let f7AltitudeFilterCommandPending = false;
+        let f7AltitudeFilterBuffer = "";
+        let f7PtlToggleClickPending = false;
+        let coordPreviewClickPending = false;
+        let coordPreviewVisible = false;
+        let coordPreviewText = "";
         let ssaMoveClickPending = false;
         let signOnMoveClickPending = false;
         let coastSuspendMoveClickPending = false;
         let laCaMciMoveClickPending = false;
         let flightPlanMoveClickPending = false;
         let towerMoveClickPending = false;
+        let towerCommandAirportIdBuffer = "";
+        let towerCommandLineCountBuffer = "";
+        let towerCommandCollectingLineCount = false;
         let vfrMoveClickPending = false;
+        let geoRestrictionsMoveClickPending = false;
+        let geoRestrictionsTogglePending = false;
         let ctrlF3CommandArmed = false;
         let ctrlF3ClearMapsPending = false;
         let ctrlF3MapTogglePending = false;
         let ctrlF3MapIdBuffer = "";
         let ctrlF4CommandArmed = false;
         let ctrlF4WxLevelBuffer = "";
+        let f12CommandArmed = false;
+        let f12RestrictionCommandPending = false;
+        let f12RestrictionIdBuffer = "";
+        let f12RestrictionCommandMode: "enable" | "disable" | null = null;
+        let f12TfrTextCommandState: F12TfrTextCommandState | null = null;
         let invalidCommandErrorPending = false;
         let touchPinchState: TouchPinchState | null = null;
         let flightRulesEventSource: EventSource | null = null;
@@ -2495,6 +3722,8 @@ function StarsApp(): ReturnType<typeof createElement> {
             dcbBrightnessAdjustMode,
             mapBrightnessPercent,
             mapBrightnessAdjustMode,
+            tfrBrightnessPercent,
+            tfrBrightnessAdjustMode,
             compassBrightnessPercent,
             compassBrightnessAdjustMode,
             listBrightnessPercent,
@@ -2519,7 +3748,37 @@ function StarsApp(): ReturnType<typeof createElement> {
             leaderLengthAdjustMode
           );
         const getDcbAuxControlsInput = (): DcbAuxControlsInput =>
-          buildDcbAuxControlsInput(dcbAuxSecondPage, volLevel, volAdjustMode, shiftFlashActive);
+          buildDcbAuxControlsInput(
+            dcbAuxSecondPage,
+            volLevel,
+            volAdjustMode,
+            historyDotCount,
+            historyDotCountAdjustMode,
+            ptlLengthMinutes,
+            ptlLengthAdjustMode,
+            shiftFlashActive,
+            ssaFilterExpanded,
+            siteMenuExpanded,
+            normalizeSelectableSiteId(activeDcbSiteId) ?? "MULTI"
+          );
+        const getDcbSiteMenuInput = (): DcbSiteMenuInput =>
+          buildDcbSiteMenuInput(
+            siteMenuExpanded,
+            siteMenuDoneFlashActive,
+            dcbSiteOptions,
+            activeDcbSiteId
+          );
+        const getDcbSsaFilterInput = (): DcbSsaFilterInput =>
+          buildDcbSsaFilterInput(
+            ssaFilterExpanded,
+            ssaFilterDoneFlashActive,
+            ssaFilterWxLineVisible,
+            ssaFilterStatusLineVisible,
+            ssaFilterRadarModeVisible,
+            ssaFilterTimeVisible,
+            ssaFilterAltimeterVisible,
+            ssaFilterAltitudeFilterLineVisible
+          );
 
         const getLeaderLineLengthPx = (): number => leaderLengthLevelToLinePx(leaderLengthLevel);
         const getLeaderLayoutLengthPx = (): number => leaderLengthLevelToLayoutPx(leaderLengthLevel);
@@ -2530,6 +3789,7 @@ function StarsApp(): ReturnType<typeof createElement> {
           rblFirstSelection = null;
           rblSecondSelection = null;
           rblDeleteIndexBuffer = "";
+          rblPreviewCursorPx = null;
         };
 
         const resolveRblSelectionFromClick = (clickX: number, clickY: number): RblEndpoint | null => {
@@ -2706,13 +3966,14 @@ function StarsApp(): ReturnType<typeof createElement> {
           const signOnListX = scopeRect.x + signOnListOffsetPxX;
           const signOnListY = scopeRect.y + signOnListOffsetPxY;
           const defaultTowerListY = scopeRect.y + Math.round(scopeRect.height * TOWER_LIST_TOP_RATIO);
-          if (!towerListPinned) {
-            towerListOffsetPxY = Math.round(defaultTowerListY - scopeRect.y);
-          }
-          const towerListX = scopeRect.x + towerListOffsetPxX;
-          const towerListY = scopeRect.y + towerListOffsetPxY;
-          const towerLineCount = 1 + TOWER_LIST_RESERVED_AIRCRAFT_ROWS;
           const listsLineHeightPx = listsRendererRef.current?.getLineHeight() ?? 14;
+          const primaryTowerDisplay =
+            towerListDisplaysByAirport.get(selectedTowerAirportIcao) ??
+            Array.from(towerListDisplaysByAirport.values()).find((towerDisplay) => towerDisplay.visible) ??
+            towerListDisplaysByAirport.values().next().value ??
+            null;
+          const primaryTowerRows = primaryTowerDisplay?.maxAircraftRows ?? towerListAircraftRows;
+          const towerLineCount = 1 + Math.max(0, primaryTowerRows);
           const flightPlanLineCount = 1;
           const defaultFlightPlanListY =
             defaultTowerListY - (flightPlanLineCount + FLIGHT_PLAN_LIST_GAP_LINES) * listsLineHeightPx;
@@ -2733,6 +3994,7 @@ function StarsApp(): ReturnType<typeof createElement> {
           const listRedColor = listBrightnessPercentToRedColor(listBrightnessPercent);
           const listSsaWxColor = listBrightnessPercentToSsaWxColor(listBrightnessPercent);
           const toolsColor = toolsBrightnessPercentToColor(toolsBrightnessPercent);
+          const ptlColor = ptlBrightnessPercentToColor(toolsBrightnessPercent);
           const blipColor = blipBrightnessPercentToColor(blipBrightnessPercent);
           const historyColors = historyBrightnessPercentToColors(historyBrightnessPercent);
           const wxFillColors = wxBrightnessPercentToFillColors(wxBrightnessPercent);
@@ -2790,6 +4052,18 @@ function StarsApp(): ReturnType<typeof createElement> {
             } | null;
             if (mapsMenuDrawer && typeof mapsMenuDrawer.drawMapsMenu === "function") {
               mapsMenuDrawer.drawMapsMenu(ctx, getDcbMapsMenuInput());
+            }
+            const ssaFilterDrawer = dcbRendererRef.current as unknown as {
+              drawSsaFilterMenu?: (ctxArg: CanvasRenderingContext2D, input: DcbSsaFilterInput) => void;
+            } | null;
+            if (ssaFilterDrawer && typeof ssaFilterDrawer.drawSsaFilterMenu === "function") {
+              ssaFilterDrawer.drawSsaFilterMenu(ctx, getDcbSsaFilterInput());
+            }
+            const siteMenuDrawer = dcbRendererRef.current as unknown as {
+              drawSiteMenu?: (ctxArg: CanvasRenderingContext2D, input: DcbSiteMenuInput) => void;
+            } | null;
+            if (siteMenuDrawer && typeof siteMenuDrawer.drawSiteMenu === "function") {
+              siteMenuDrawer.drawSiteMenu(ctx, getDcbSiteMenuInput());
             }
           };
 
@@ -2898,6 +4172,53 @@ function StarsApp(): ReturnType<typeof createElement> {
             );
           }
 
+          const tfrOverlayColor = scaleRgbCssColor(starsColors.YELLOW, tfrBrightnessPercent, {
+            r: 255,
+            g: 255,
+            b: 0
+          });
+          const tfrOverlayBlinkColor = scaleRgbCssColor(starsColors.YELLOW, 10, {
+            r: 255,
+            g: 255,
+            b: 0
+          });
+          const tfrBlinkDimmed =
+            Math.floor(Date.now() / TFR_LABEL_BLINK_HALF_CYCLE_MS) % 2 === 0;
+          drawActiveTfrOverlays(
+            ctx,
+            scopeRect,
+            resolveWxCenter(),
+            videoMapRangeNm,
+            videoMapPanOffsetPxX,
+            videoMapPanOffsetPxY,
+            tfrDisplayRecords,
+            activeTfrSourceIds,
+            tfrTextStateBySourceId,
+            tfrBlinkDimmed,
+            tfrOverlayColor,
+            getRestrictionAreaStipplePattern(ctx, tfrOverlayColor, TFR_STIPPLE_ALPHA),
+            tfrOverlayColor,
+            tfrOverlayBlinkColor,
+            (ctxArg, x, y, text, color) => {
+              const renderer = listsRendererRef.current;
+              if (!renderer) {
+                return;
+              }
+              const lines = text.split("\n");
+              const lineHeight = renderer.getLineHeight();
+              const startY = Math.round(
+                y - ((lines.length - 1) * (lineHeight + TFR_LABEL_LINE_GAP_PX)) / 2
+              );
+              for (let lineIndex = 0; lineIndex < lines.length; lineIndex += 1) {
+                const line = lines[lineIndex];
+                const lineWidth = renderer.measureTextWidth(line);
+                const lineX = Math.round(x - lineWidth / 2);
+                const lineY = Math.round(startY + lineIndex * (lineHeight + TFR_LABEL_LINE_GAP_PX));
+                renderer.drawText(ctxArg, lineX, lineY, line, color);
+              }
+            }
+          );
+
           const blipRenderer = blipRendererRef.current;
           const datablockRenderer = datablockRendererRef.current;
           const radarCenter = resolveWxCenter();
@@ -2908,11 +4229,52 @@ function StarsApp(): ReturnType<typeof createElement> {
             const leaderDirection = getLeaderDirection();
             const leaderLineLengthPx = getLeaderLineLengthPx();
             const leaderLayoutLengthPx = getLeaderLayoutLengthPx();
+            const pixelsPerNm = Math.min(scopeRect.width, scopeRect.height) / (2 * videoMapRangeNm);
+            const primaryTargetBodyShape: "circle" | "track-perpendicular-rectangle" =
+              normalizeSelectableSiteId(activeDcbSiteId) === "MULTI"
+                ? "track-perpendicular-rectangle"
+                : "circle";
 
             ctx.save();
             ctx.beginPath();
             ctx.rect(scopeRect.x, scopeRect.y, scopeRect.width, scopeRect.height);
             ctx.clip();
+
+            const aircraftById = new Map(displayedAircraft.map((aircraft) => [aircraft.id, aircraft]));
+            const drawRblLabel = (
+              ctxArg: CanvasRenderingContext2D,
+              x: number,
+              y: number,
+              text: string,
+              color: string
+            ): void => {
+              const listsRuntime = listsRendererRef.current as unknown as {
+                drawText?: (
+                  ctx: CanvasRenderingContext2D,
+                  x: number,
+                  y: number,
+                  text: string,
+                  color: string
+                ) => void;
+              } | null;
+              if (typeof listsRuntime?.drawText === "function") {
+                listsRuntime.drawText(ctxArg, x, y, text, color);
+                return;
+              }
+              ctxArg.fillStyle = color;
+              ctxArg.font = RBL_LABEL_FONT;
+              ctxArg.fillText(text, Math.round(x), Math.round(y));
+            };
+            const measureRblLabelWidth = (text: string): number => {
+              const listsRuntime = listsRendererRef.current as unknown as {
+                measureTextWidth?: (text: string) => number;
+              } | null;
+              if (typeof listsRuntime?.measureTextWidth === "function") {
+                return Math.max(0, listsRuntime.measureTextWidth(text));
+              }
+              ctx.font = RBL_LABEL_FONT;
+              return Math.max(0, ctx.measureText(text).width);
+            };
 
             drawRangeBearingLines(
               ctx,
@@ -2922,27 +4284,64 @@ function StarsApp(): ReturnType<typeof createElement> {
               videoMapPanOffsetPxX,
               videoMapPanOffsetPxY,
               rblLines,
-              new Map(displayedAircraft.map((aircraft) => [aircraft.id, aircraft])),
+              aircraftById,
               toolsColor,
-              (ctxArg, x, y, text, color) => {
-                const listsRuntime = listsRendererRef.current as unknown as {
-                  drawText?: (
-                    ctx: CanvasRenderingContext2D,
-                    x: number,
-                    y: number,
-                    text: string,
-                    color: string
-                  ) => void;
-                } | null;
-                if (typeof listsRuntime?.drawText === "function") {
-                  listsRuntime.drawText(ctxArg, x, y, text, color);
-                  return;
-                }
-                ctxArg.fillStyle = color;
-                ctxArg.font = RBL_LABEL_FONT;
-                ctxArg.fillText(text, Math.round(x), Math.round(y));
-              }
+              1,
+              drawRblLabel
             );
+
+            if (
+              rblCommandActive &&
+              rblFirstSelection &&
+              !rblSecondSelection &&
+              rblPreviewCursorPx
+            ) {
+              const previewLatLon = unprojectScopeToLatLon(
+                rblPreviewCursorPx,
+                radarCenter,
+                videoMapRangeNm,
+                scopeRect,
+                videoMapPanOffsetPxX,
+                videoMapPanOffsetPxY
+              );
+              if (previewLatLon) {
+                drawRangeBearingLines(
+                  ctx,
+                  scopeRect,
+                  resolveWxCenter(),
+                  videoMapRangeNm,
+                  videoMapPanOffsetPxX,
+                  videoMapPanOffsetPxY,
+                  [
+                    {
+                      start: rblFirstSelection,
+                      end: {
+                        kind: "point",
+                        lat: previewLatLon.lat,
+                        lon: previewLatLon.lon
+                      }
+                    }
+                  ],
+                  aircraftById,
+                  toolsColor,
+                  rblLines.length + 1,
+                  drawRblLabel
+                );
+              }
+            }
+
+            const predictedMinSepOverlay =
+              predictedMinSepPair !== null
+                ? resolvePredictedMinSeparationOverlay(
+                    predictedMinSepPair,
+                    aircraftById,
+                    scopeRect,
+                    radarCenter,
+                    videoMapRangeNm,
+                    videoMapPanOffsetPxX,
+                    videoMapPanOffsetPxY
+                  )
+                : null;
 
             for (const aircraft of aircraftToDraw) {
               const projectedCurrent = projectLatLonToScope(
@@ -2958,7 +4357,7 @@ function StarsApp(): ReturnType<typeof createElement> {
 
               blipRenderer.drawHistoryDots(ctx, aircraft.previousPositions, {
                 dotRadiusPx: 3.5,
-                maxDots: 5,
+                maxDots: historyDotCount,
                 projectPosition: (sample) => {
                   const projected = projectLatLonToScope(
                     { lat: sample.lat, lon: sample.lon },
@@ -2973,7 +4372,40 @@ function StarsApp(): ReturnType<typeof createElement> {
                 }
               });
 
-              const isExpanded = expandedDatablockAircraftIds.has(aircraft.id);
+              if (
+                ptlEnabledAircraftIds.has(aircraft.id) &&
+                aircraft.trackDeg !== null &&
+                Number.isFinite(aircraft.trackDeg) &&
+                aircraft.groundspeedKts !== null &&
+                Number.isFinite(aircraft.groundspeedKts) &&
+                aircraft.groundspeedKts > 0
+              ) {
+                const predictedDistanceNm =
+                  aircraft.groundspeedKts * (clampPtlLengthMinutes(ptlLengthMinutes) / 60);
+                if (predictedDistanceNm > 0) {
+                  const headingVector = headingToUnitVector(normalizeHeadingDeg(aircraft.trackDeg));
+                  const predictedLengthPx = predictedDistanceNm * pixelsPerNm;
+                  ctx.beginPath();
+                  ctx.moveTo(drawX, drawY);
+                  ctx.lineTo(
+                    drawX + headingVector.x * predictedLengthPx,
+                    drawY - headingVector.y * predictedLengthPx
+                  );
+                  ctx.strokeStyle = ptlColor;
+                  ctx.lineWidth = 1;
+                  ctx.lineCap = "round";
+                  ctx.stroke();
+                }
+              }
+
+              const hideDatablockForAltitude = altitudeFilteredAircraftIds.has(aircraft.id);
+              const showFilteredDatablock =
+                hideDatablockForAltitude &&
+                altitudeFilterManualRevealAircraftIds.has(aircraft.id);
+              const drawDatablock = !hideDatablockForAltitude || showFilteredDatablock;
+              const isExpanded = drawDatablock && expandedDatablockAircraftIds.has(aircraft.id);
+              const isCyanHighlighted = cyanHighlightedAircraftIds.has(aircraft.id);
+              const aircraftAccentColor = isCyanHighlighted ? starsColors.CYAN : null;
 
               const datablockInput = {
                 id: aircraft.id,
@@ -2989,13 +4421,16 @@ function StarsApp(): ReturnType<typeof createElement> {
                 expanded: isExpanded,
                 leaderLengthPx: leaderLayoutLengthPx,
                 leaderDirection,
-                timeMs: Date.now()
+                timeMs: Date.now(),
+                color: aircraftAccentColor
               };
 
               const blipHit = blipRenderer.getPrimaryTargetHitRegion({
                 x: drawX,
                 y: drawY,
-                trackDeg: aircraft.trackDeg
+                trackDeg: aircraft.trackDeg,
+                squawk: aircraft.squawk,
+                bodyShape: primaryTargetBodyShape
               });
               aircraftHitTargets.push({
                 id: aircraft.id,
@@ -3006,23 +4441,42 @@ function StarsApp(): ReturnType<typeof createElement> {
               });
 
               // Draw leader first so the blip/symbol sits on top of it.
-              datablockRenderer.drawWithOptions(ctx, datablockInput, {
-                drawLeader: leaderLineLengthPx > 0,
-                drawText: false
-              });
+              if (drawDatablock) {
+                datablockRenderer.drawWithOptions(ctx, datablockInput, {
+                  drawLeader: leaderLineLengthPx > 0,
+                  drawText: false
+                });
+              }
 
               blipRenderer.drawPrimaryTarget(ctx, {
                 x: drawX,
                 y: drawY,
                 trackDeg: aircraft.trackDeg,
-                tcpCode
+                tcpCode,
+                squawk: aircraft.squawk,
+                bodyShape: primaryTargetBodyShape,
+                symbolColor: aircraftAccentColor ?? undefined
               });
 
-              const hit = datablockRenderer.drawWithOptions(ctx, datablockInput, {
-                drawLeader: false,
-                drawText: true
-              });
-              datablockHitRegions.push(hit);
+              if (drawDatablock) {
+                const hit = datablockRenderer.drawWithOptions(ctx, datablockInput, {
+                  drawLeader: false,
+                  drawText: true
+                });
+                datablockHitRegions.push(hit);
+              }
+            }
+
+            if (predictedMinSepOverlay) {
+              const lineHeightPx = listsRendererRef.current?.getLineHeight() ?? 12;
+              drawPredictedMinSeparationOverlay(
+                ctx,
+                predictedMinSepOverlay,
+                toolsColor,
+                lineHeightPx,
+                drawRblLabel,
+                measureRblLabelWidth
+              );
             }
             ctx.restore();
           }
@@ -3033,21 +4487,53 @@ function StarsApp(): ReturnType<typeof createElement> {
           listsRendererRef.current?.drawSsa(ctx, {
             x: ssaListX,
             y: ssaListY,
-            airportIcao: SSA_AIRPORT_ICAO,
+            airportIcao: ssaMainAirportIcao,
             qnhInHg: ssaQnhInHg,
+            siteMode: normalizeSelectableSiteId(activeDcbSiteId) ?? "MULTI",
+            showStatusPart: ssaFilterStatusLineVisible,
+            showRadarPart: ssaFilterRadarModeVisible,
+            showUtcTime: ssaFilterTimeVisible,
+            showAltimeter: ssaFilterAltimeterVisible,
+            showWxLine: ssaFilterWxLineVisible,
             wxActiveLevels: activeWxLevels,
             wxAvailableLevels: wxLevelsAvailable,
             qnhStations: ssaQnhStations,
             rangeNm: videoMapRangeNm,
+            ptlLengthMinutes,
+            altitudeFilterLine: ssaFilterAltitudeFilterLineVisible
+              ? formatAltitudeFilterLine(activeAltitudeFilter)
+              : null,
             wxHistoryFrameNo: wxHistoryPlaybackFrameNo
           });
 
-          if (towerListVisible) {
+          let towerAutoStackIndex = 0;
+          for (const towerDisplay of towerListDisplaysByAirport.values()) {
+            if (!towerDisplay.visible) {
+              continue;
+            }
+            const towerRows = Math.max(0, towerDisplay.maxAircraftRows);
+            let towerListX = scopeRect.x + towerDisplay.offsetPxX;
+            let towerListY = scopeRect.y + towerDisplay.offsetPxY;
+            if (!towerDisplay.pinned) {
+              const stackedYOffset =
+                towerAutoStackIndex * listsLineHeightPx * (towerRows + VFR_LIST_GAP_LINES + 1);
+              towerListX = scopeRect.x + SSA_MARGIN_LEFT_PX;
+              towerListY = defaultTowerListY + stackedYOffset;
+              towerDisplay.offsetPxX = Math.round(towerListX - scopeRect.x);
+              towerDisplay.offsetPxY = Math.round(towerListY - scopeRect.y);
+            }
+            towerAutoStackIndex += 1;
+
+            const towerListAirportIata =
+              formatTowerAirportIata(towerDisplay.airportIcao) || towerDisplay.airportIcao;
+            const towerInboundAircraft =
+              towerInboundAircraftByIcao.get(towerDisplay.airportIcao) ?? [];
             listsRendererRef.current?.drawTowerList(ctx, {
               x: towerListX,
               y: towerListY,
               align: "left",
-              airportIata: TOWER_LIST_AIRPORT_IATA_NORMALIZED,
+              airportIata: towerListAirportIata,
+              maxAircraftRows: towerRows,
               aircraft: towerInboundAircraft
             });
           }
@@ -3085,7 +4571,7 @@ function StarsApp(): ReturnType<typeof createElement> {
               x: signOnListX,
               y: signOnListY,
               align: "right",
-              positionId: CONTROL_POSITION_ID,
+              positionId: controlPositionId,
               signedOnUtc: signedOnUtcRef.current ?? new Date()
             });
           }
@@ -3108,6 +4594,7 @@ function StarsApp(): ReturnType<typeof createElement> {
             });
           }
 
+          let currentMapsListTopY: number | null = null;
           if (currentMapsListVisible) {
             const sortedCurrentMapIds = Array.from(activeMapIds).sort((a, b) => a - b);
             const rowCount = 1 + sortedCurrentMapIds.length;
@@ -3127,6 +4614,7 @@ function StarsApp(): ReturnType<typeof createElement> {
                 CURRENT_MAPS_LIST_MARGIN_BOTTOM_PX -
                 rowCount * listsLineHeightPx
             );
+            currentMapsListTopY = listY;
             const idX = listX + CURRENT_MAPS_LIST_ID_COLUMN_OFFSET_PX;
             const labelX = listX + CURRENT_MAPS_LIST_LABEL_COLUMN_OFFSET_PX;
             const nameX = listX + CURRENT_MAPS_LIST_NAME_COLUMN_OFFSET_PX;
@@ -3144,6 +4632,112 @@ function StarsApp(): ReturnType<typeof createElement> {
               listsRendererRef.current?.drawText(ctx, labelX, rowY, label, listColor);
               listsRendererRef.current?.drawText(ctx, nameX, rowY, name, listColor);
             }
+          }
+
+          let geoRestrictionsListTopY: number | null = null;
+          if (geoRestrictionsListVisible) {
+            const sortedRestrictions = [...tfrDisplayRecords].sort((a, b) => a.displayId - b.displayId);
+            const rowCount = 1 + sortedRestrictions.length;
+            const centeredX = scopeRect.x + (scopeRect.width - GEO_RESTRICTIONS_LIST_BLOCK_WIDTH_PX) * 0.5;
+            const minX = scopeRect.x + GEO_RESTRICTIONS_LIST_HORIZONTAL_MARGIN_PX;
+            const maxX =
+              scopeRect.x +
+              Math.max(
+                GEO_RESTRICTIONS_LIST_HORIZONTAL_MARGIN_PX,
+                scopeRect.width -
+                  GEO_RESTRICTIONS_LIST_BLOCK_WIDTH_PX -
+                  GEO_RESTRICTIONS_LIST_HORIZONTAL_MARGIN_PX
+              );
+            const defaultX = Math.round(Math.min(Math.max(centeredX, minX), maxX));
+            const defaultYBase =
+              currentMapsListTopY !== null
+                ? currentMapsListTopY - (rowCount + 1) * listsLineHeightPx
+                : scopeRect.y +
+                  scopeRect.height -
+                  GEO_RESTRICTIONS_LIST_MARGIN_BOTTOM_PX -
+                  rowCount * listsLineHeightPx;
+            const defaultY = Math.max(scopeRect.y + 8, Math.round(defaultYBase));
+
+            let listX = defaultX;
+            let listY = defaultY;
+            if (geoRestrictionsListPinned) {
+              listX = scopeRect.x + geoRestrictionsListOffsetPxX;
+              listY = scopeRect.y + geoRestrictionsListOffsetPxY;
+            } else {
+              geoRestrictionsListOffsetPxX = Math.round(defaultX - scopeRect.x);
+              geoRestrictionsListOffsetPxY = Math.round(defaultY - scopeRect.y);
+            }
+
+            geoRestrictionsListTopY = listY;
+            const listRuntime = listsRendererRef.current as unknown as {
+              drawGeoRestrictionsList?: (
+                ctxArg: CanvasRenderingContext2D,
+                input: {
+                  x: number;
+                  y: number;
+                  align?: "left" | "right";
+                  entries?: Array<{
+                    id: number | string;
+                    localName: string | null;
+                  }>;
+                }
+              ) => void;
+            } | null;
+            if (typeof listRuntime?.drawGeoRestrictionsList === "function") {
+              listRuntime.drawGeoRestrictionsList(ctx, {
+                x: listX,
+                y: listY,
+                align: "left",
+                entries: sortedRestrictions.map((restriction) => ({
+                  id: restriction.displayId,
+                  localName: restriction.localName
+                }))
+              });
+            } else {
+              listsRendererRef.current?.drawText(ctx, listX, listY, "GEO RESTRICTIONS", listColor);
+              for (let i = 0; i < sortedRestrictions.length; i += 1) {
+                const rowY = listY + (i + 1) * listsLineHeightPx;
+                const row = sortedRestrictions[i];
+                listsRendererRef.current?.drawText(
+                  ctx,
+                  listX,
+                  rowY,
+                  `${row.displayId} ${row.localName}`,
+                  listColor
+                );
+              }
+            }
+          }
+
+          if (coordPreviewVisible && coordPreviewText.length > 0) {
+            const estimatedPreviewWidthPx = Math.max(48, coordPreviewText.length * 8);
+            const centeredX = scopeRect.x + (scopeRect.width - estimatedPreviewWidthPx) * 0.5;
+            const minX = scopeRect.x + CURRENT_MAPS_LIST_HORIZONTAL_MARGIN_PX;
+            const maxX =
+              scopeRect.x +
+              Math.max(
+                CURRENT_MAPS_LIST_HORIZONTAL_MARGIN_PX,
+                scopeRect.width - estimatedPreviewWidthPx - CURRENT_MAPS_LIST_HORIZONTAL_MARGIN_PX
+              );
+            const previewX = Math.round(Math.min(Math.max(centeredX, minX), maxX));
+            const previewAnchorTopY =
+              currentMapsListTopY === null
+                ? geoRestrictionsListTopY
+                : geoRestrictionsListTopY === null
+                  ? currentMapsListTopY
+                  : Math.min(currentMapsListTopY, geoRestrictionsListTopY);
+            const previewYBase =
+              previewAnchorTopY !== null
+                ? previewAnchorTopY - listsLineHeightPx
+                : scopeRect.y + scopeRect.height - CURRENT_MAPS_LIST_MARGIN_BOTTOM_PX;
+            const previewY = Math.max(
+              scopeRect.y + 8,
+              Math.min(
+                scopeRect.y + scopeRect.height - listsLineHeightPx,
+                Math.round(previewYBase)
+              )
+            );
+            listsRendererRef.current?.drawText(ctx, previewX, previewY, coordPreviewText, listColor);
           }
         };
 
@@ -3167,6 +4761,9 @@ function StarsApp(): ReturnType<typeof createElement> {
             if (disposed) {
               return;
             }
+            ssaMainAirportIcao = normalizeIcaoCode(response.mainIcao) ?? SSA_AIRPORT_ICAO;
+            controlPositionId =
+              normalizeControllerPositionCode(response.positionId) ?? CONTROL_POSITION_ID;
             const stationByIcao = new Map(
               response.stations.map((station) => [station.icao, station] as const)
             );
@@ -3192,14 +4789,19 @@ function StarsApp(): ReturnType<typeof createElement> {
 
             if (normalizedStations.length === 0) {
               normalizedStations.push({
-                airportIcao: SSA_AIRPORT_ICAO,
+                airportIcao: ssaMainAirportIcao,
                 qnhInHg: null
               });
             }
 
             ssaQnhStations = normalizedStations;
-            const mainStation = normalizedStations.find((station) => station.airportIcao === SSA_AIRPORT_ICAO);
+            syncTowerAirportOrderFromStations(normalizedStations);
+            const mainStation = normalizedStations.find(
+              (station) => station.airportIcao === ssaMainAirportIcao
+            );
             ssaQnhInHg = mainStation?.qnhInHg ?? null;
+            rebuildTowerInboundAircraft(displayedAircraft);
+            rebuildAltitudeFilteredAircraft(displayedAircraft);
             render();
           } catch (qnhError) {
             console.error("Failed to refresh SSA QNH:", qnhError);
@@ -3213,6 +4815,30 @@ function StarsApp(): ReturnType<typeof createElement> {
               return;
             }
 
+            dcbSiteOptions = buildDcbSiteOptionsFromTraconConfig(traconConfig);
+            const normalizedActiveSiteId = normalizeSelectableSiteId(activeDcbSiteId);
+            if (normalizedActiveSiteId && dcbSiteOptions.some((site) => site.siteId === normalizedActiveSiteId)) {
+              activeDcbSiteId = normalizedActiveSiteId;
+            } else if (dcbSiteOptions.some((site) => site.siteId === "MULTI")) {
+              activeDcbSiteId = "MULTI";
+            } else if (dcbSiteOptions.some((site) => site.siteId === "FUSED")) {
+              activeDcbSiteId = "FUSED";
+            } else {
+              activeDcbSiteId = dcbSiteOptions[0]?.siteId ?? "MULTI";
+            }
+
+            const nextTowerAirportRefsByIcao = new Map<string, LatLon>();
+            for (const airportIcao of Object.keys(traconConfig.airports ?? {})) {
+              const normalizedIcao = normalizeIcaoCode(airportIcao);
+              if (!normalizedIcao) {
+                continue;
+              }
+              const airportRef = extractTowerAirportRef(traconConfig, normalizedIcao);
+              if (airportRef) {
+                nextTowerAirportRefsByIcao.set(normalizedIcao, airportRef);
+              }
+            }
+            towerAirportRefsByIcao = nextTowerAirportRefsByIcao;
             towerAirportRef = extractTowerAirportRef(traconConfig, TOWER_LIST_AIRPORT_ICAO_NORMALIZED);
             videoMapCenterRef = extractTowerAirportRef(
               traconConfig,
@@ -3227,6 +4853,7 @@ function StarsApp(): ReturnType<typeof createElement> {
             if (rangeRingCenterRef === null) {
               rangeRingCenterRef = videoMapCenterRef ?? towerAirportRef;
             }
+            rebuildTowerInboundAircraft(displayedAircraft);
             approachExemptionCorridors = extractApproachExemptionCorridors(
               traconConfig,
               VIDEO_MAP_CENTER_AIRPORT_ICAO_NORMALIZED
@@ -3317,6 +4944,115 @@ function StarsApp(): ReturnType<typeof createElement> {
           } else {
             activeMapIds.add(normalizedMapId);
           }
+          render();
+          return true;
+        };
+
+        const refreshTfrs = async (): Promise<void> => {
+          try {
+            const payload = await fetchTfrs({ baseUrl: API_BASE_URL });
+            if (disposed) {
+              return;
+            }
+            tfrDisplayRecords = buildTfrDisplayRecords(payload);
+            const validSourceIds = new Set(tfrDisplayRecords.map((tfr) => tfr.sourceId));
+            for (const activeSourceId of [...activeTfrSourceIds]) {
+              if (!validSourceIds.has(activeSourceId)) {
+                activeTfrSourceIds.delete(activeSourceId);
+              }
+            }
+            for (const sourceId of [...tfrTextStateBySourceId.keys()]) {
+              if (!validSourceIds.has(sourceId)) {
+                tfrTextStateBySourceId.delete(sourceId);
+              }
+            }
+            render();
+          } catch (error) {
+            console.error("Failed to refresh TFR list:", error);
+          }
+        };
+
+        const setTfrByDisplayId = (
+          displayId: number,
+          shouldEnable: boolean
+        ): boolean => {
+          const normalizedDisplayId = Math.floor(displayId);
+          const tfr = findTfrByDisplayId(tfrDisplayRecords, normalizedDisplayId);
+          if (!tfr) {
+            return false;
+          }
+
+          const isActive = activeTfrSourceIds.has(tfr.sourceId);
+          if (shouldEnable && !isActive) {
+            activeTfrSourceIds.add(tfr.sourceId);
+            render();
+          } else if (!shouldEnable && isActive) {
+            activeTfrSourceIds.delete(tfr.sourceId);
+            render();
+          }
+          return true;
+        };
+
+        const setTfrTextVisibilityByDisplayId = (
+          displayId: number,
+          visible: boolean
+        ): boolean => {
+          const normalizedDisplayId = Math.floor(displayId);
+          const tfr = findTfrByDisplayId(tfrDisplayRecords, normalizedDisplayId);
+          if (!tfr) {
+            return false;
+          }
+          const textState = getOrCreateTfrTextState(tfrTextStateBySourceId, tfr.sourceId);
+          textState.visible = visible;
+          if (!visible) {
+            textState.blink = false;
+          }
+          render();
+          return true;
+        };
+
+        const toggleTfrTextVisibilityByDisplayId = (displayId: number): boolean => {
+          const normalizedDisplayId = Math.floor(displayId);
+          const tfr = findTfrByDisplayId(tfrDisplayRecords, normalizedDisplayId);
+          if (!tfr) {
+            return false;
+          }
+          const textState = getOrCreateTfrTextState(tfrTextStateBySourceId, tfr.sourceId);
+          return setTfrTextVisibilityByDisplayId(displayId, !textState.visible);
+        };
+
+        const toggleTfrTextBlinkByDisplayId = (displayId: number): boolean => {
+          const normalizedDisplayId = Math.floor(displayId);
+          const tfr = findTfrByDisplayId(tfrDisplayRecords, normalizedDisplayId);
+          if (!tfr) {
+            return false;
+          }
+          const textState = getOrCreateTfrTextState(tfrTextStateBySourceId, tfr.sourceId);
+          if (!textState.visible) {
+            textState.visible = true;
+            textState.blink = true;
+          } else if (!textState.blink) {
+            textState.blink = true;
+          } else {
+            textState.blink = false;
+            textState.visible = false;
+          }
+          render();
+          return true;
+        };
+
+        const setTfrCustomTextByDisplayId = (
+          displayId: number,
+          text: string
+        ): boolean => {
+          const normalizedDisplayId = Math.floor(displayId);
+          const tfr = findTfrByDisplayId(tfrDisplayRecords, normalizedDisplayId);
+          if (!tfr) {
+            return false;
+          }
+          const textState = getOrCreateTfrTextState(tfrTextStateBySourceId, tfr.sourceId);
+          const trimmedText = text.trim();
+          textState.customText = trimmedText.length > 0 ? trimmedText : null;
           render();
           return true;
         };
@@ -3506,24 +5242,278 @@ function StarsApp(): ReturnType<typeof createElement> {
           });
         };
 
+        const clearTowerCommandInputState = (): void => {
+          towerCommandAirportIdBuffer = "";
+          towerCommandLineCountBuffer = "";
+          towerCommandCollectingLineCount = false;
+        };
+
+        const getOrCreateTowerListDisplay = (airportIcao: string): TowerListDisplayState => {
+          const existing = towerListDisplaysByAirport.get(airportIcao);
+          if (existing) {
+            return existing;
+          }
+          const created: TowerListDisplayState = {
+            airportIcao,
+            offsetPxX: SSA_MARGIN_LEFT_PX,
+            offsetPxY: 0,
+            pinned: false,
+            visible: true,
+            maxAircraftRows: towerListAircraftRows
+          };
+          towerListDisplaysByAirport.set(airportIcao, created);
+          return created;
+        };
+
+        const resolveTowerAirportIcaoById = (airportId: number): string | null => {
+          const index = Math.floor(airportId) - 1;
+          if (index < 0 || index >= towerAirportOrderIcaos.length) {
+            return null;
+          }
+          return towerAirportOrderIcaos[index] ?? null;
+        };
+
+        const resolveTowerCommandSelection = (): {
+          airportIcao: string;
+          aircraftRows: number | null;
+          explicitAirport: boolean;
+          explicitRows: boolean;
+        } | null => {
+          const explicitAirport = towerCommandAirportIdBuffer.length > 0;
+          const explicitRows = towerCommandLineCountBuffer.length > 0;
+
+          let airportIcao = selectedTowerAirportIcao;
+          if (explicitAirport) {
+            const parsedAirportId = Number.parseInt(towerCommandAirportIdBuffer, 10);
+            if (!Number.isInteger(parsedAirportId) || parsedAirportId <= 0) {
+              return null;
+            }
+            const resolvedAirport = resolveTowerAirportIcaoById(parsedAirportId);
+            if (!resolvedAirport) {
+              return null;
+            }
+            airportIcao = resolvedAirport;
+          }
+
+          let aircraftRows: number | null = null;
+          if (explicitRows) {
+            const parsedLineCount = Number.parseInt(towerCommandLineCountBuffer, 10);
+            if (!Number.isInteger(parsedLineCount) || parsedLineCount < 1) {
+              return null;
+            }
+            aircraftRows = Math.min(99, Math.max(0, parsedLineCount - 1));
+          }
+
+          return {
+            airportIcao,
+            aircraftRows,
+            explicitAirport,
+            explicitRows
+          };
+        };
+
+        const applyTowerCommandSelection = (
+          selection: {
+            airportIcao: string;
+            aircraftRows: number | null;
+            explicitAirport: boolean;
+            explicitRows: boolean;
+          },
+          toggleWhenNoArguments: boolean
+        ): void => {
+          selectedTowerAirportIcao = selection.airportIcao;
+          if (selection.aircraftRows !== null) {
+            towerListAircraftRows = selection.aircraftRows;
+          }
+          const display = getOrCreateTowerListDisplay(selection.airportIcao);
+          if (selection.aircraftRows !== null) {
+            display.maxAircraftRows = selection.aircraftRows;
+          }
+          if (!selection.explicitAirport && !selection.explicitRows && toggleWhenNoArguments) {
+            display.visible = !display.visible;
+          } else {
+            display.visible = true;
+          }
+        };
+
+        const syncTowerAirportOrderFromStations = (
+          stations: Array<{ airportIcao: string; qnhInHg: number | null }>
+        ): void => {
+          const ordered: string[] = [];
+          const seen = new Set<string>();
+          for (const station of stations) {
+            const icao = normalizeIcaoCode(station.airportIcao);
+            if (!icao || seen.has(icao)) {
+              continue;
+            }
+            seen.add(icao);
+            ordered.push(icao);
+          }
+
+          if (ordered.length === 0) {
+            ordered.push(TOWER_LIST_AIRPORT_ICAO_NORMALIZED);
+          }
+
+          towerAirportOrderIcaos = ordered;
+          if (!towerAirportOrderIcaos.includes(selectedTowerAirportIcao)) {
+            selectedTowerAirportIcao = towerAirportOrderIcaos[0] ?? TOWER_LIST_AIRPORT_ICAO_NORMALIZED;
+            getOrCreateTowerListDisplay(selectedTowerAirportIcao);
+          }
+        };
+
+        const resolveTowerAirportRef = (airportIcao: string): LatLon | null =>
+          towerAirportRefsByIcao.get(airportIcao) ??
+          (airportIcao === TOWER_LIST_AIRPORT_ICAO_NORMALIZED ? towerAirportRef : null);
+
+        const rebuildTowerInboundAircraft = (aircraftFeed: AircraftFeedItem[]): void => {
+          const airports =
+            towerAirportOrderIcaos.length > 0
+              ? towerAirportOrderIcaos
+              : [TOWER_LIST_AIRPORT_ICAO_NORMALIZED];
+          const stagedByAirport = new Map<
+            string,
+            Array<{
+              callsign: string | null;
+              aircraftTypeIcao: string | null;
+              distanceNm: number | null;
+            }>
+          >();
+          const seenByAirport = new Map<string, Set<string>>();
+          for (const airport of airports) {
+            stagedByAirport.set(airport, []);
+            seenByAirport.set(airport, new Set<string>());
+          }
+
+          for (const aircraft of aircraftFeed) {
+            const destinationRaw =
+              typeof aircraft.destinationIata === "string"
+                ? aircraft.destinationIata.trim().toUpperCase()
+                : "";
+            const effectiveDestination = destinationRaw.length > 0 ? destinationRaw : null;
+            if (!effectiveDestination) {
+              continue;
+            }
+
+            const callsign = normalizeCallsign(aircraft.callsign);
+            if (!callsign) {
+              continue;
+            }
+
+            const aircraftTypeIcao = (aircraft.aircraftTypeIcao ?? "").trim().toUpperCase() || null;
+            for (const airportIcao of airports) {
+              if (!destinationMatchesTowerAirport(effectiveDestination, airportIcao)) {
+                continue;
+              }
+              const seenForAirport = seenByAirport.get(airportIcao);
+              const rowsForAirport = stagedByAirport.get(airportIcao);
+              if (!seenForAirport || !rowsForAirport || seenForAirport.has(callsign)) {
+                continue;
+              }
+              seenForAirport.add(callsign);
+              const airportRef = resolveTowerAirportRef(airportIcao);
+              const distanceNm =
+                airportRef === null
+                  ? null
+                  : distanceNmBetween(
+                      { lat: aircraft.position.lat, lon: aircraft.position.lon },
+                      airportRef
+                    );
+              rowsForAirport.push({ callsign, aircraftTypeIcao, distanceNm });
+            }
+          }
+
+          const nextByAirport = new Map<
+            string,
+            Array<{
+              callsign: string | null;
+              aircraftTypeIcao: string | null;
+            }>
+          >();
+          for (const airportIcao of airports) {
+            const rows = stagedByAirport.get(airportIcao) ?? [];
+            rows.sort((a, b) => {
+              if (a.distanceNm === null && b.distanceNm === null) {
+                return (a.callsign ?? "").localeCompare(b.callsign ?? "");
+              }
+              if (a.distanceNm === null) {
+                return 1;
+              }
+              if (b.distanceNm === null) {
+                return -1;
+              }
+              if (a.distanceNm !== b.distanceNm) {
+                return a.distanceNm - b.distanceNm;
+              }
+              return (a.callsign ?? "").localeCompare(b.callsign ?? "");
+            });
+            nextByAirport.set(
+              airportIcao,
+              rows.map((row) => ({
+                callsign: row.callsign,
+                aircraftTypeIcao: row.aircraftTypeIcao
+              }))
+            );
+          }
+          towerInboundAircraftByIcao = nextByAirport;
+        };
+
+        const isAircraftAssociatedWithScope = (aircraft: AircraftFeedItem): boolean => {
+          const aircraftPositionId = normalizeControllerPositionCode(aircraft.controllerPosition);
+          const onControllerPosition =
+            aircraftPositionId !== null && aircraftPositionId === controlPositionId;
+          const destinationRaw =
+            typeof aircraft.destinationIata === "string"
+              ? aircraft.destinationIata.trim().toUpperCase()
+              : "";
+          const destination = destinationRaw.length > 0 ? destinationRaw : null;
+          const inboundMainAirport = destinationMatchesTowerAirport(destination, ssaMainAirportIcao);
+          return onControllerPosition || inboundMainAirport;
+        };
+
+        const rebuildAltitudeFilteredAircraft = (aircraftFeed: AircraftFeedItem[]): void => {
+          altitudeFilteredAircraftIds.clear();
+          const visibleAircraftIds = new Set<string>();
+          for (const aircraft of aircraftFeed) {
+            visibleAircraftIds.add(aircraft.id);
+          }
+
+          if (activeAltitudeFilter) {
+            for (const aircraft of aircraftFeed) {
+              const range = isAircraftAssociatedWithScope(aircraft)
+                ? activeAltitudeFilter.associated
+                : activeAltitudeFilter.unassociated;
+              const altitudeFt = aircraft.altitudeAmslFt;
+              if (altitudeFt === null || !Number.isFinite(altitudeFt)) {
+                altitudeFilteredAircraftIds.add(aircraft.id);
+                continue;
+              }
+              if (altitudeFt < range.minFt || altitudeFt > range.maxFt) {
+                altitudeFilteredAircraftIds.add(aircraft.id);
+              }
+            }
+          }
+
+          for (const id of [...altitudeFilterManualRevealAircraftIds]) {
+            if (!visibleAircraftIds.has(id) || !altitudeFilteredAircraftIds.has(id)) {
+              altitudeFilterManualRevealAircraftIds.delete(id);
+            }
+          }
+        };
+
         const refreshCoastSuspend = async (): Promise<void> => {
           try {
             const response = await fetchAircraftFeed({ baseUrl: API_BASE_URL });
-            let cpsAircraft: Array<{ callsign: string; cps: string }> = [];
-            try {
-              const cpsResponse = await fetchAircraftCps({ baseUrl: API_BASE_URL });
-              cpsAircraft = cpsResponse.aircraft;
-            } catch (cpsError) {
-              console.warn("Failed to refresh aircraft CPS cache:", cpsError);
-            }
             if (disposed) {
               return;
             }
             displayedAircraft = response.aircraft;
             const nextTcpByCallsign = new Map<string, string>();
-            for (const entry of cpsAircraft) {
-              const callsign = normalizeCallsign(entry.callsign);
-              const tcp = typeof entry.cps === "string" ? entry.cps.trim().toUpperCase() : "";
+            for (const aircraft of response.aircraft) {
+              const callsign = normalizeCallsign(aircraft.callsign);
+              const tcp =
+                typeof aircraft.controllerPosition === "string"
+                  ? aircraft.controllerPosition.trim().toUpperCase()
+                  : "";
               if (!callsign || tcp.length === 0) {
                 continue;
               }
@@ -3536,6 +5526,30 @@ function StarsApp(): ReturnType<typeof createElement> {
               if (!visibleAircraftIds.has(id)) {
                 expandedDatablockAircraftIds.delete(id);
               }
+            }
+            for (const id of [...cyanHighlightedAircraftIds]) {
+              if (!visibleAircraftIds.has(id)) {
+                cyanHighlightedAircraftIds.delete(id);
+              }
+            }
+            for (const id of [...ptlEnabledAircraftIds]) {
+              if (!visibleAircraftIds.has(id)) {
+                ptlEnabledAircraftIds.delete(id);
+              }
+            }
+            if (
+              predictedMinSepPair &&
+              (!visibleAircraftIds.has(predictedMinSepPair.firstAircraftId) ||
+                !visibleAircraftIds.has(predictedMinSepPair.secondAircraftId))
+            ) {
+              predictedMinSepPair = null;
+            }
+            if (
+              predictedMinSepFirstAircraftId !== null &&
+              !visibleAircraftIds.has(predictedMinSepFirstAircraftId)
+            ) {
+              predictedMinSepFirstAircraftId = null;
+              predictedMinSepCommandActive = false;
             }
 
             const callsigns: string[] = [];
@@ -3556,52 +5570,8 @@ function StarsApp(): ReturnType<typeof createElement> {
             }
 
             coastSuspendCallsigns = callsigns;
-            const towerInbound: Array<{
-              callsign: string | null;
-              aircraftTypeIcao: string | null;
-              distanceNm: number | null;
-            }> = [];
-            const towerSeen = new Set<string>();
-            for (const aircraft of response.aircraft) {
-              const destinationIata = (aircraft.destinationIata ?? "").trim().toUpperCase();
-              if (destinationIata !== TOWER_LIST_AIRPORT_IATA_NORMALIZED) {
-                continue;
-              }
-
-              const callsign = (aircraft.callsign ?? "").trim().toUpperCase();
-              if (!callsign || towerSeen.has(callsign)) {
-                continue;
-              }
-              towerSeen.add(callsign);
-              const aircraftTypeIcao = (aircraft.aircraftTypeIcao ?? "").trim().toUpperCase() || null;
-              const distanceNm =
-                towerAirportRef === null
-                  ? null
-                  : distanceNmBetween(
-                      { lat: aircraft.position.lat, lon: aircraft.position.lon },
-                      towerAirportRef
-                    );
-              towerInbound.push({ callsign, aircraftTypeIcao, distanceNm });
-            }
-            towerInbound.sort((a, b) => {
-              if (a.distanceNm === null && b.distanceNm === null) {
-                return (a.callsign ?? "").localeCompare(b.callsign ?? "");
-              }
-              if (a.distanceNm === null) {
-                return 1;
-              }
-              if (b.distanceNm === null) {
-                return -1;
-              }
-              if (a.distanceNm !== b.distanceNm) {
-                return a.distanceNm - b.distanceNm;
-              }
-              return (a.callsign ?? "").localeCompare(b.callsign ?? "");
-            });
-            towerInboundAircraft = towerInbound.map((entry) => ({
-              callsign: entry.callsign,
-              aircraftTypeIcao: entry.aircraftTypeIcao
-            }));
+            rebuildTowerInboundAircraft(response.aircraft);
+            rebuildAltitudeFilteredAircraft(response.aircraft);
             const lowAltitudeAlerts = collectLowAltitudeAlerts(
               response.aircraft,
               mvaSectors,
@@ -3717,16 +5687,7 @@ function StarsApp(): ReturnType<typeof createElement> {
         const onKeyDown = (event: KeyboardEvent): void => {
           if (rblCommandActive) {
             if (event.key === "Enter") {
-              if (rblFirstSelection && rblSecondSelection) {
-                const hasAircraft =
-                  rblFirstSelection.kind === "aircraft" || rblSecondSelection.kind === "aircraft";
-                if (hasAircraft) {
-                  rblLines.push({
-                    start: rblFirstSelection,
-                    end: rblSecondSelection
-                  });
-                }
-              } else if (rblFirstSelection && rblDeleteIndexBuffer.length > 0) {
+              if (rblFirstSelection && rblDeleteIndexBuffer.length > 0) {
                 const parsedIndex = Number.parseInt(rblDeleteIndexBuffer, 10);
                 const targetIndex = parsedIndex - 1;
                 if (
@@ -3770,43 +5731,86 @@ function StarsApp(): ReturnType<typeof createElement> {
             return;
           }
 
+          if (predictedMinSepCommandActive) {
+            if (event.key === "Enter") {
+              predictedMinSepPair = null;
+              predictedMinSepFirstAircraftId = null;
+              predictedMinSepCommandActive = false;
+              render();
+              event.preventDefault();
+              return;
+            }
+          }
+
           if (
             event.key === "Escape" &&
             (
               f7CommandArmed ||
+              f7CoordCommandPending ||
+              f7GeoRestrictionsCommandPending ||
               f7WxCommandPending ||
               f7WxHistoryConfirmPending ||
+              f7AltitudeFilterCommandPending ||
+              f7PtlToggleClickPending ||
               ctrlF3CommandArmed ||
               ctrlF3ClearMapsPending ||
               ctrlF3MapTogglePending ||
               ctrlF4CommandArmed ||
+              f12CommandArmed ||
+              f12RestrictionCommandPending ||
+              f12TfrTextCommandState !== null ||
+              predictedMinSepCommandActive ||
+              predictedMinSepFirstAircraftId !== null ||
+              predictedMinSepPair !== null ||
               invalidCommandErrorPending ||
+              coordPreviewClickPending ||
+              coordPreviewVisible ||
               ssaMoveClickPending ||
               signOnMoveClickPending ||
               coastSuspendMoveClickPending ||
               laCaMciMoveClickPending ||
               flightPlanMoveClickPending ||
               towerMoveClickPending ||
-              vfrMoveClickPending
+              vfrMoveClickPending ||
+              geoRestrictionsMoveClickPending
             )
           ) {
             f7CommandArmed = false;
+            f7CoordCommandPending = false;
+            f7GeoRestrictionsCommandPending = false;
             f7WxCommandPending = false;
             f7WxHistoryConfirmPending = false;
+            f7AltitudeFilterCommandPending = false;
+            f7AltitudeFilterBuffer = "";
+            f7PtlToggleClickPending = false;
             ctrlF3CommandArmed = false;
             ctrlF3ClearMapsPending = false;
             ctrlF3MapTogglePending = false;
             ctrlF3MapIdBuffer = "";
             ctrlF4CommandArmed = false;
             ctrlF4WxLevelBuffer = "";
+            f12CommandArmed = false;
+            f12RestrictionCommandPending = false;
+            f12RestrictionIdBuffer = "";
+            f12RestrictionCommandMode = null;
+            f12TfrTextCommandState = null;
+            predictedMinSepCommandActive = false;
+            predictedMinSepFirstAircraftId = null;
+            predictedMinSepPair = null;
             invalidCommandErrorPending = false;
+            coordPreviewClickPending = false;
+            coordPreviewVisible = false;
+            coordPreviewText = "";
             ssaMoveClickPending = false;
             signOnMoveClickPending = false;
             coastSuspendMoveClickPending = false;
             laCaMciMoveClickPending = false;
             flightPlanMoveClickPending = false;
             towerMoveClickPending = false;
+            clearTowerCommandInputState();
             vfrMoveClickPending = false;
+            geoRestrictionsMoveClickPending = false;
+            geoRestrictionsTogglePending = false;
             event.preventDefault();
             return;
           }
@@ -3814,6 +5818,22 @@ function StarsApp(): ReturnType<typeof createElement> {
           if (invalidCommandErrorPending && event.key === "Enter") {
             invalidCommandErrorPending = false;
             playErrorAlertTone();
+            event.preventDefault();
+            return;
+          }
+
+          if (f7CoordCommandPending) {
+            if (isModifierOnlyKey(event)) {
+              return;
+            }
+            if (isAsteriskCommandKey(event)) {
+              f7CoordCommandPending = false;
+              coordPreviewClickPending = true;
+              event.preventDefault();
+              return;
+            }
+            f7CoordCommandPending = false;
+            invalidCommandErrorPending = true;
             event.preventDefault();
             return;
           }
@@ -3841,6 +5861,64 @@ function StarsApp(): ReturnType<typeof createElement> {
               return;
             }
             f7WxCommandPending = false;
+            invalidCommandErrorPending = true;
+            event.preventDefault();
+            return;
+          }
+
+          if (f7GeoRestrictionsCommandPending) {
+            if (isModifierOnlyKey(event)) {
+              return;
+            }
+            if (event.key.toUpperCase() === "A") {
+              f7GeoRestrictionsCommandPending = false;
+              geoRestrictionsMoveClickPending = true;
+              geoRestrictionsTogglePending = true;
+              event.preventDefault();
+              return;
+            }
+            f7GeoRestrictionsCommandPending = false;
+            invalidCommandErrorPending = true;
+            event.preventDefault();
+            return;
+          }
+
+          if (f7AltitudeFilterCommandPending) {
+            if (event.key === "Enter") {
+              const parsedFilter = parseAltitudeFilterConfigFromBuffer(f7AltitudeFilterBuffer);
+              f7AltitudeFilterCommandPending = false;
+              f7AltitudeFilterBuffer = "";
+              if (!parsedFilter) {
+                playErrorAlertTone();
+                event.preventDefault();
+                return;
+              }
+              activeAltitudeFilter = parsedFilter;
+              altitudeFilterManualRevealAircraftIds.clear();
+              rebuildAltitudeFilteredAircraft(displayedAircraft);
+              render();
+              event.preventDefault();
+              return;
+            }
+            if (event.key === "Backspace") {
+              f7AltitudeFilterBuffer = f7AltitudeFilterBuffer.slice(0, -1);
+              event.preventDefault();
+              return;
+            }
+            if (isModifierOnlyKey(event)) {
+              return;
+            }
+            if (event.key === " " || event.code === "Space") {
+              event.preventDefault();
+              return;
+            }
+            if (/^[0-9Nn]$/.test(event.key) && f7AltitudeFilterBuffer.length < 12) {
+              f7AltitudeFilterBuffer += event.key.toUpperCase();
+              event.preventDefault();
+              return;
+            }
+            f7AltitudeFilterCommandPending = false;
+            f7AltitudeFilterBuffer = "";
             invalidCommandErrorPending = true;
             event.preventDefault();
             return;
@@ -3935,6 +6013,237 @@ function StarsApp(): ReturnType<typeof createElement> {
             return;
           }
 
+          if (f12TfrTextCommandState !== null) {
+            if (f12TfrTextCommandState.stage === "collect-id") {
+              if (event.key === "Backspace") {
+                f12TfrTextCommandState = {
+                  stage: "collect-id",
+                  idBuffer: f12TfrTextCommandState.idBuffer.slice(0, -1)
+                };
+                event.preventDefault();
+                return;
+              }
+              const parsedDigit = parseSingleDigitKey(event);
+              if (parsedDigit !== null && f12TfrTextCommandState.idBuffer.length < 4) {
+                f12TfrTextCommandState = {
+                  stage: "collect-id",
+                  idBuffer: f12TfrTextCommandState.idBuffer + String(parsedDigit)
+                };
+                event.preventDefault();
+                return;
+              }
+              if (isModifierOnlyKey(event)) {
+                return;
+              }
+              if (event.key.toUpperCase() === "T") {
+                const parsedId = Number.parseInt(f12TfrTextCommandState.idBuffer, 10);
+                if (Number.isInteger(parsedId)) {
+                  f12TfrTextCommandState = {
+                    stage: "await-action",
+                    displayId: parsedId
+                  };
+                } else {
+                  f12TfrTextCommandState = null;
+                  invalidCommandErrorPending = true;
+                }
+                event.preventDefault();
+                return;
+              }
+              f12TfrTextCommandState = null;
+              invalidCommandErrorPending = true;
+              event.preventDefault();
+              return;
+            }
+
+            if (f12TfrTextCommandState.stage === "await-action") {
+              if (event.key === "Enter") {
+                const handled = toggleTfrTextVisibilityByDisplayId(f12TfrTextCommandState.displayId);
+                f12TfrTextCommandState = null;
+                if (!handled) {
+                  playErrorAlertTone();
+                }
+                event.preventDefault();
+                return;
+              }
+              if (event.key === "Backspace") {
+                f12TfrTextCommandState = {
+                  stage: "collect-id",
+                  idBuffer: String(f12TfrTextCommandState.displayId)
+                };
+                event.preventDefault();
+                return;
+              }
+              if (isModifierOnlyKey(event)) {
+                return;
+              }
+              if (isBackslashCommandKey(event)) {
+                f12TfrTextCommandState = {
+                  stage: "await-blink-enter",
+                  displayId: f12TfrTextCommandState.displayId
+                };
+                event.preventDefault();
+                return;
+              }
+              if (isPrintableCommandKey(event)) {
+                f12TfrTextCommandState = {
+                  stage: "collect-custom-text",
+                  displayId: f12TfrTextCommandState.displayId,
+                  textBuffer: event.key
+                };
+                event.preventDefault();
+                return;
+              }
+              f12TfrTextCommandState = null;
+              invalidCommandErrorPending = true;
+              event.preventDefault();
+              return;
+            }
+
+            if (f12TfrTextCommandState.stage === "await-blink-enter") {
+              if (event.key === "Enter") {
+                const handled = toggleTfrTextBlinkByDisplayId(f12TfrTextCommandState.displayId);
+                f12TfrTextCommandState = null;
+                if (!handled) {
+                  playErrorAlertTone();
+                }
+                event.preventDefault();
+                return;
+              }
+              if (event.key === "Backspace") {
+                f12TfrTextCommandState = {
+                  stage: "await-action",
+                  displayId: f12TfrTextCommandState.displayId
+                };
+                event.preventDefault();
+                return;
+              }
+              if (isModifierOnlyKey(event)) {
+                return;
+              }
+              f12TfrTextCommandState = null;
+              invalidCommandErrorPending = true;
+              event.preventDefault();
+              return;
+            }
+
+            if (event.key === "Enter") {
+              const handled = setTfrCustomTextByDisplayId(
+                f12TfrTextCommandState.displayId,
+                f12TfrTextCommandState.textBuffer
+              );
+              f12TfrTextCommandState = null;
+              if (!handled) {
+                playErrorAlertTone();
+              }
+              event.preventDefault();
+              return;
+            }
+            if (event.key === "Backspace") {
+              f12TfrTextCommandState = {
+                stage: "collect-custom-text",
+                displayId: f12TfrTextCommandState.displayId,
+                textBuffer: f12TfrTextCommandState.textBuffer.slice(0, -1)
+              };
+              event.preventDefault();
+              return;
+            }
+            if (isModifierOnlyKey(event)) {
+              return;
+            }
+            if (isPrintableCommandKey(event)) {
+              f12TfrTextCommandState = {
+                stage: "collect-custom-text",
+                displayId: f12TfrTextCommandState.displayId,
+                textBuffer: f12TfrTextCommandState.textBuffer + event.key
+              };
+              event.preventDefault();
+              return;
+            }
+            f12TfrTextCommandState = null;
+            invalidCommandErrorPending = true;
+            event.preventDefault();
+            return;
+          }
+
+          if (f12RestrictionCommandPending) {
+            if (event.key === "Enter") {
+              const parsedId = Number.parseInt(f12RestrictionIdBuffer, 10);
+              const commandMode = f12RestrictionCommandMode;
+              f12RestrictionCommandPending = false;
+              f12RestrictionIdBuffer = "";
+              f12RestrictionCommandMode = null;
+              if (
+                Number.isInteger(parsedId) &&
+                (commandMode === "enable" || commandMode === "disable") &&
+                setTfrByDisplayId(parsedId, commandMode === "enable")
+              ) {
+                // handled
+              } else {
+                playErrorAlertTone();
+              }
+              event.preventDefault();
+              return;
+            }
+            if (event.key === "Backspace") {
+              f12RestrictionIdBuffer = f12RestrictionIdBuffer.slice(0, -1);
+              event.preventDefault();
+              return;
+            }
+            const parsedDigit = parseSingleDigitKey(event);
+            if (parsedDigit !== null && f12RestrictionIdBuffer.length < 4) {
+              f12RestrictionIdBuffer += String(parsedDigit);
+              event.preventDefault();
+              return;
+            }
+            if (isModifierOnlyKey(event)) {
+              return;
+            }
+            f12RestrictionCommandPending = false;
+            f12RestrictionIdBuffer = "";
+            f12RestrictionCommandMode = null;
+            invalidCommandErrorPending = true;
+            event.preventDefault();
+            return;
+          }
+
+          if (f12CommandArmed) {
+            if (event.key.toUpperCase() === "E") {
+              f12CommandArmed = false;
+              f12RestrictionCommandPending = true;
+              f12RestrictionIdBuffer = "";
+              f12RestrictionCommandMode = "enable";
+              event.preventDefault();
+              return;
+            }
+            if (event.key.toUpperCase() === "I") {
+              f12CommandArmed = false;
+              f12RestrictionCommandPending = true;
+              f12RestrictionIdBuffer = "";
+              f12RestrictionCommandMode = "disable";
+              event.preventDefault();
+              return;
+            }
+            const parsedDigit = parseSingleDigitKey(event);
+            if (parsedDigit !== null) {
+              f12CommandArmed = false;
+              f12RestrictionCommandPending = false;
+              f12RestrictionIdBuffer = "";
+              f12RestrictionCommandMode = null;
+              f12TfrTextCommandState = {
+                stage: "collect-id",
+                idBuffer: String(parsedDigit)
+              };
+              event.preventDefault();
+              return;
+            }
+            f12CommandArmed = false;
+            f12RestrictionCommandMode = null;
+            f12TfrTextCommandState = null;
+            invalidCommandErrorPending = true;
+            event.preventDefault();
+            return;
+          }
+
           if (laCaMciMoveClickPending && event.key === "Enter") {
             laCaMciListVisible = !laCaMciListVisible;
             laCaMciMoveClickPending = false;
@@ -3991,13 +6300,75 @@ function StarsApp(): ReturnType<typeof createElement> {
               event.preventDefault();
               return;
             }
+            if (event.key.toUpperCase() === "R") {
+              flightPlanMoveClickPending = false;
+              f7GeoRestrictionsCommandPending = true;
+              event.preventDefault();
+              return;
+            }
             flightPlanMoveClickPending = false;
           }
 
-          if (towerMoveClickPending && event.key === "Enter") {
-            towerListVisible = !towerListVisible;
+          if (towerMoveClickPending) {
+            if (event.key === "Enter") {
+              const selection = resolveTowerCommandSelection();
+              towerMoveClickPending = false;
+              if (!selection) {
+                clearTowerCommandInputState();
+                playErrorAlertTone();
+                event.preventDefault();
+                return;
+              }
+              applyTowerCommandSelection(selection, true);
+              clearTowerCommandInputState();
+              rebuildTowerInboundAircraft(displayedAircraft);
+              render();
+              event.preventDefault();
+              return;
+            }
+            if (event.key === "Backspace") {
+              if (towerCommandCollectingLineCount) {
+                if (towerCommandLineCountBuffer.length > 0) {
+                  towerCommandLineCountBuffer = towerCommandLineCountBuffer.slice(0, -1);
+                } else {
+                  towerCommandCollectingLineCount = false;
+                }
+              } else {
+                towerCommandAirportIdBuffer = towerCommandAirportIdBuffer.slice(0, -1);
+              }
+              event.preventDefault();
+              return;
+            }
+            if ((event.code === "Space" || event.key === " ") && !towerCommandCollectingLineCount) {
+              if (towerCommandAirportIdBuffer.length === 0) {
+                towerMoveClickPending = false;
+                clearTowerCommandInputState();
+                invalidCommandErrorPending = true;
+                event.preventDefault();
+                return;
+              }
+              towerCommandCollectingLineCount = true;
+              event.preventDefault();
+              return;
+            }
+            const parsedDigit = parseSingleDigitKey(event);
+            if (parsedDigit !== null) {
+              if (towerCommandCollectingLineCount) {
+                if (towerCommandLineCountBuffer.length < 2) {
+                  towerCommandLineCountBuffer += String(parsedDigit);
+                }
+              } else if (towerCommandAirportIdBuffer.length < 2) {
+                towerCommandAirportIdBuffer += String(parsedDigit);
+              }
+              event.preventDefault();
+              return;
+            }
+            if (isModifierOnlyKey(event)) {
+              return;
+            }
             towerMoveClickPending = false;
-            render();
+            clearTowerCommandInputState();
+            invalidCommandErrorPending = true;
             event.preventDefault();
             return;
           }
@@ -4005,6 +6376,17 @@ function StarsApp(): ReturnType<typeof createElement> {
           if (vfrMoveClickPending && event.key === "Enter") {
             vfrListVisible = !vfrListVisible;
             vfrMoveClickPending = false;
+            render();
+            event.preventDefault();
+            return;
+          }
+
+          if (geoRestrictionsMoveClickPending && event.key === "Enter") {
+            geoRestrictionsMoveClickPending = false;
+            if (geoRestrictionsTogglePending) {
+              geoRestrictionsListVisible = !geoRestrictionsListVisible;
+            }
+            geoRestrictionsTogglePending = false;
             render();
             event.preventDefault();
             return;
@@ -4026,12 +6408,32 @@ function StarsApp(): ReturnType<typeof createElement> {
             if (event.key.toUpperCase() === "P") {
               f7CommandArmed = false;
               towerMoveClickPending = true;
+              clearTowerCommandInputState();
+              event.preventDefault();
+              return;
+            }
+            if (event.key.toUpperCase() === "D") {
+              f7CommandArmed = false;
+              f7CoordCommandPending = true;
               event.preventDefault();
               return;
             }
             if (event.key.toUpperCase() === "T") {
               f7CommandArmed = false;
               flightPlanMoveClickPending = true;
+              event.preventDefault();
+              return;
+            }
+            if (event.key.toUpperCase() === "F") {
+              f7CommandArmed = false;
+              f7AltitudeFilterCommandPending = true;
+              f7AltitudeFilterBuffer = "";
+              event.preventDefault();
+              return;
+            }
+            if (event.key.toUpperCase() === "R") {
+              f7CommandArmed = false;
+              f7PtlToggleClickPending = true;
               event.preventDefault();
               return;
             }
@@ -4043,20 +6445,34 @@ function StarsApp(): ReturnType<typeof createElement> {
 
           if (event.key === "F7") {
             f7CommandArmed = true;
+            f7CoordCommandPending = false;
+            f7GeoRestrictionsCommandPending = false;
             f7WxCommandPending = false;
             f7WxHistoryConfirmPending = false;
+            f7AltitudeFilterCommandPending = false;
+            f7AltitudeFilterBuffer = "";
+            f7PtlToggleClickPending = false;
             ctrlF3MapTogglePending = false;
             ctrlF3MapIdBuffer = "";
             ctrlF4CommandArmed = false;
             ctrlF4WxLevelBuffer = "";
+            f12CommandArmed = false;
+            f12RestrictionCommandPending = false;
+            f12RestrictionIdBuffer = "";
+            f12RestrictionCommandMode = null;
+            f12TfrTextCommandState = null;
             invalidCommandErrorPending = false;
+            coordPreviewClickPending = false;
             ssaMoveClickPending = false;
             signOnMoveClickPending = false;
             coastSuspendMoveClickPending = false;
             laCaMciMoveClickPending = false;
             flightPlanMoveClickPending = false;
             towerMoveClickPending = false;
+            clearTowerCommandInputState();
             vfrMoveClickPending = false;
+            geoRestrictionsMoveClickPending = false;
+            geoRestrictionsTogglePending = false;
             event.preventDefault();
             return;
           }
@@ -4068,6 +6484,18 @@ function StarsApp(): ReturnType<typeof createElement> {
             ctrlF3MapIdBuffer = "";
             ctrlF4CommandArmed = false;
             ctrlF4WxLevelBuffer = "";
+            f12CommandArmed = false;
+            f12RestrictionCommandPending = false;
+            f12RestrictionIdBuffer = "";
+            f12RestrictionCommandMode = null;
+            f12TfrTextCommandState = null;
+            f7AltitudeFilterCommandPending = false;
+            f7AltitudeFilterBuffer = "";
+            f7PtlToggleClickPending = false;
+            towerMoveClickPending = false;
+            clearTowerCommandInputState();
+            geoRestrictionsMoveClickPending = false;
+            geoRestrictionsTogglePending = false;
             invalidCommandErrorPending = false;
             event.preventDefault();
             return;
@@ -4076,6 +6504,47 @@ function StarsApp(): ReturnType<typeof createElement> {
           if (event.ctrlKey && event.key === "F4") {
             ctrlF4CommandArmed = true;
             ctrlF4WxLevelBuffer = "";
+            f12CommandArmed = false;
+            f12RestrictionCommandPending = false;
+            f12RestrictionIdBuffer = "";
+            f12RestrictionCommandMode = null;
+            f12TfrTextCommandState = null;
+            f7AltitudeFilterCommandPending = false;
+            f7AltitudeFilterBuffer = "";
+            f7PtlToggleClickPending = false;
+            towerMoveClickPending = false;
+            clearTowerCommandInputState();
+            geoRestrictionsMoveClickPending = false;
+            geoRestrictionsTogglePending = false;
+            invalidCommandErrorPending = false;
+            event.preventDefault();
+            return;
+          }
+
+          if (event.key === "F12") {
+            f12CommandArmed = true;
+            f12RestrictionCommandPending = false;
+            f12RestrictionIdBuffer = "";
+            f12RestrictionCommandMode = null;
+            f12TfrTextCommandState = null;
+            f7CommandArmed = false;
+            f7CoordCommandPending = false;
+            f7GeoRestrictionsCommandPending = false;
+            f7WxCommandPending = false;
+            f7WxHistoryConfirmPending = false;
+            f7AltitudeFilterCommandPending = false;
+            f7AltitudeFilterBuffer = "";
+            f7PtlToggleClickPending = false;
+            ctrlF3CommandArmed = false;
+            ctrlF3ClearMapsPending = false;
+            ctrlF3MapTogglePending = false;
+            ctrlF3MapIdBuffer = "";
+            ctrlF4CommandArmed = false;
+            ctrlF4WxLevelBuffer = "";
+            towerMoveClickPending = false;
+            clearTowerCommandInputState();
+            geoRestrictionsMoveClickPending = false;
+            geoRestrictionsTogglePending = false;
             invalidCommandErrorPending = false;
             event.preventDefault();
             return;
@@ -4088,14 +6557,22 @@ function StarsApp(): ReturnType<typeof createElement> {
               rblFirstSelection = null;
               rblSecondSelection = null;
               rblDeleteIndexBuffer = "";
+              rblPreviewCursorPx = null;
               event.preventDefault();
               return;
             }
             rblTriggerArmed = false;
           }
 
-          if (event.key === "*") {
+          if (isAsteriskCommandKey(event)) {
             rblTriggerArmed = true;
+            event.preventDefault();
+            return;
+          }
+
+          if (isBackslashCommandKey(event)) {
+            predictedMinSepCommandActive = true;
+            predictedMinSepFirstAircraftId = null;
             event.preventDefault();
             return;
           }
@@ -4119,11 +6596,14 @@ function StarsApp(): ReturnType<typeof createElement> {
           rrBrightnessWheelAccumulatorPx = 0;
           dcbBrightnessWheelAccumulatorPx = 0;
           mapBrightnessWheelAccumulatorPx = 0;
+          tfrBrightnessWheelAccumulatorPx = 0;
           compassBrightnessWheelAccumulatorPx = 0;
           listBrightnessWheelAccumulatorPx = 0;
           toolsBrightnessWheelAccumulatorPx = 0;
           blipBrightnessWheelAccumulatorPx = 0;
           historyBrightnessWheelAccumulatorPx = 0;
+          historyDotCountWheelAccumulatorPx = 0;
+          ptlLengthWheelAccumulatorPx = 0;
           wxBrightnessWheelAccumulatorPx = 0;
           wxStippleBrightnessWheelAccumulatorPx = 0;
           volWheelAccumulatorPx = 0;
@@ -4136,7 +6616,10 @@ function StarsApp(): ReturnType<typeof createElement> {
           rrBrightnessAdjustMode = false;
           dcbBrightnessAdjustMode = false;
           volAdjustMode = false;
+          historyDotCountAdjustMode = false;
+          ptlLengthAdjustMode = false;
           mapBrightnessAdjustMode = false;
+          tfrBrightnessAdjustMode = false;
           compassBrightnessAdjustMode = false;
           listBrightnessAdjustMode = false;
           toolsBrightnessAdjustMode = false;
@@ -4182,6 +6665,22 @@ function StarsApp(): ReturnType<typeof createElement> {
           if (briteDoneFlashTimer !== null) {
             window.clearTimeout(briteDoneFlashTimer);
             briteDoneFlashTimer = null;
+          }
+        };
+
+        const clearSsaFilterDoneFlash = (): void => {
+          ssaFilterDoneFlashActive = false;
+          if (ssaFilterDoneFlashTimer !== null) {
+            window.clearTimeout(ssaFilterDoneFlashTimer);
+            ssaFilterDoneFlashTimer = null;
+          }
+        };
+
+        const clearSiteMenuDoneFlash = (): void => {
+          siteMenuDoneFlashActive = false;
+          if (siteMenuDoneFlashTimer !== null) {
+            window.clearTimeout(siteMenuDoneFlashTimer);
+            siteMenuDoneFlashTimer = null;
           }
         };
 
@@ -4245,6 +6744,62 @@ function StarsApp(): ReturnType<typeof createElement> {
           const scopeRect = getScopeRect();
           const dcbMapsInput = getDcbMapsInput();
 
+          if (coordPreviewClickPending) {
+            coordPreviewClickPending = false;
+            let resolvedLatLon: LatLon | null = null;
+
+            const clickedAircraftId = pickAircraftAtPoint(aircraftHitTargets, clickX, clickY);
+            if (clickedAircraftId) {
+              const clickedAircraft = displayedAircraft.find((aircraft) => aircraft.id === clickedAircraftId) ?? null;
+              if (clickedAircraft) {
+                resolvedLatLon = {
+                  lat: clickedAircraft.position.lat,
+                  lon: clickedAircraft.position.lon
+                };
+              }
+            }
+
+            if (!resolvedLatLon && pointInScopeRect(clickX, clickY, scopeRect)) {
+              const center = resolveWxCenter();
+              if (center) {
+                resolvedLatLon = unprojectScopeToLatLon(
+                  { x: clickX, y: clickY },
+                  center,
+                  videoMapRangeNm,
+                  scopeRect,
+                  videoMapPanOffsetPxX,
+                  videoMapPanOffsetPxY
+                );
+              }
+            }
+
+            if (!resolvedLatLon) {
+              playErrorAlertTone();
+              render();
+              return;
+            }
+
+            coordPreviewText = formatPreviewCoordinate(resolvedLatLon.lat, resolvedLatLon.lon);
+            coordPreviewVisible = true;
+            render();
+            return;
+          }
+
+          if (geoRestrictionsMoveClickPending) {
+            if (pointInScopeRect(clickX, clickY, scopeRect)) {
+              geoRestrictionsListOffsetPxX = Math.round(clickX - scopeRect.x);
+              geoRestrictionsListOffsetPxY = Math.round(clickY - scopeRect.y);
+              geoRestrictionsListPinned = true;
+              geoRestrictionsListVisible = true;
+              geoRestrictionsMoveClickPending = false;
+              geoRestrictionsTogglePending = false;
+              render();
+              return;
+            }
+            geoRestrictionsMoveClickPending = false;
+            geoRestrictionsTogglePending = false;
+          }
+
           if (laCaMciMoveClickPending) {
             if (pointInScopeRect(clickX, clickY, scopeRect)) {
               laCaMciListOffsetPxX = Math.round(clickX - scopeRect.x);
@@ -4298,16 +6853,27 @@ function StarsApp(): ReturnType<typeof createElement> {
           }
 
           if (towerMoveClickPending) {
-            if (pointInScopeRect(clickX, clickY, scopeRect)) {
-              towerListOffsetPxX = Math.round(clickX - scopeRect.x);
-              towerListOffsetPxY = Math.round(clickY - scopeRect.y);
-              towerListPinned = true;
-              towerListVisible = true;
-              towerMoveClickPending = false;
+            const selection = resolveTowerCommandSelection();
+            towerMoveClickPending = false;
+            if (!selection) {
+              clearTowerCommandInputState();
+              playErrorAlertTone();
               render();
               return;
             }
-            towerMoveClickPending = false;
+            applyTowerCommandSelection(selection, false);
+            clearTowerCommandInputState();
+            const towerDisplay = getOrCreateTowerListDisplay(selection.airportIcao);
+            towerDisplay.offsetPxX = Math.round(clickX - scopeRect.x);
+            towerDisplay.offsetPxY = Math.round(clickY - scopeRect.y);
+            towerDisplay.pinned = true;
+            towerDisplay.visible = true;
+            if (selection.aircraftRows !== null) {
+              towerDisplay.maxAircraftRows = selection.aircraftRows;
+            }
+            rebuildTowerInboundAircraft(displayedAircraft);
+            render();
+            return;
           }
 
           if (vfrMoveClickPending) {
@@ -4333,6 +6899,23 @@ function StarsApp(): ReturnType<typeof createElement> {
             return;
           }
 
+          if (f7PtlToggleClickPending) {
+            f7PtlToggleClickPending = false;
+            const clickedAircraftId = pickAircraftAtPoint(aircraftHitTargets, clickX, clickY);
+            if (!clickedAircraftId) {
+              playErrorAlertTone();
+              render();
+              return;
+            }
+            if (ptlEnabledAircraftIds.has(clickedAircraftId)) {
+              ptlEnabledAircraftIds.delete(clickedAircraftId);
+            } else {
+              ptlEnabledAircraftIds.add(clickedAircraftId);
+            }
+            render();
+            return;
+          }
+
           if (rblCommandActive) {
             if (!pointInScopeRect(clickX, clickY, scopeRect)) {
               return;
@@ -4345,18 +6928,49 @@ function StarsApp(): ReturnType<typeof createElement> {
               rblFirstSelection = selection;
               rblSecondSelection = null;
               rblDeleteIndexBuffer = "";
+              rblPreviewCursorPx = { x: clickX, y: clickY };
               render();
               return;
             }
-            if (!rblSecondSelection) {
-              rblSecondSelection = selection;
-              rblDeleteIndexBuffer = "";
+            const hasAircraft =
+              rblFirstSelection.kind === "aircraft" || selection.kind === "aircraft";
+            if (hasAircraft) {
+              rblLines.push({
+                start: rblFirstSelection,
+                end: selection
+              });
+            }
+            resetRblCommand();
+            render();
+            return;
+          }
+
+          if (predictedMinSepCommandActive) {
+            if (!pointInScopeRect(clickX, clickY, scopeRect)) {
+              return;
+            }
+            const clickedAircraftId = pickAircraftAtPoint(aircraftHitTargets, clickX, clickY);
+            if (!clickedAircraftId) {
+              playErrorAlertTone();
               render();
               return;
             }
-            rblFirstSelection = selection;
-            rblSecondSelection = null;
-            rblDeleteIndexBuffer = "";
+            if (!predictedMinSepFirstAircraftId) {
+              predictedMinSepFirstAircraftId = clickedAircraftId;
+              render();
+              return;
+            }
+            if (clickedAircraftId === predictedMinSepFirstAircraftId) {
+              playErrorAlertTone();
+              render();
+              return;
+            }
+            predictedMinSepPair = {
+              firstAircraftId: predictedMinSepFirstAircraftId,
+              secondAircraftId: clickedAircraftId
+            };
+            predictedMinSepCommandActive = false;
+            predictedMinSepFirstAircraftId = null;
             render();
             return;
           }
@@ -4378,7 +6992,11 @@ function StarsApp(): ReturnType<typeof createElement> {
                 armShiftFlash(() => {
                   dcbAuxSecondPage = false;
                   volAdjustMode = false;
+                  historyDotCountAdjustMode = false;
+                  ptlLengthAdjustMode = false;
                   volWheelAccumulatorPx = 0;
+                  historyDotCountWheelAccumulatorPx = 0;
+                  ptlLengthWheelAccumulatorPx = 0;
                 });
                 render();
                 return;
@@ -4395,9 +7013,207 @@ function StarsApp(): ReturnType<typeof createElement> {
                 render();
                 return;
               }
+              if (clickedAuxControl === "history") {
+                historyDotCountAdjustMode = !historyDotCountAdjustMode;
+                if (historyDotCountAdjustMode) {
+                  resetWheelTuneAccumulators();
+                  disableWheelTuneModes();
+                  historyDotCountAdjustMode = true;
+                } else {
+                  historyDotCountWheelAccumulatorPx = 0;
+                }
+                render();
+                return;
+              }
+              if (clickedAuxControl === "ptl") {
+                ptlLengthAdjustMode = !ptlLengthAdjustMode;
+                if (ptlLengthAdjustMode) {
+                  resetWheelTuneAccumulators();
+                  disableWheelTuneModes();
+                  ptlLengthAdjustMode = true;
+                } else {
+                  ptlLengthWheelAccumulatorPx = 0;
+                }
+                render();
+                return;
+              }
               if (clickY >= DCB_MAPS_Y_PX && clickY <= DCB_MAPS_Y_PX + DCB_MAPS_HEIGHT_PX) {
                 return;
               }
+            }
+
+            const briteHitTester = dcbRenderer as unknown as {
+              hitTestBrite?: (
+                input: DcbBriteInput,
+                x: number,
+                y: number
+              ) => DcbBriteControlHit | null;
+            };
+            const briteInput = getDcbBriteInput();
+            const clickedBriteRaw =
+              typeof briteHitTester.hitTestBrite === "function"
+                ? briteHitTester.hitTestBrite(briteInput, clickX, clickY)
+                : null;
+            const clickedBriteFallback = hitTestBriteFallback(briteInput, clickX, clickY);
+            let clickedBrite =
+              clickedBriteRaw === "brite-menu"
+                ? clickedBriteFallback ?? clickedBriteRaw
+                : clickedBriteRaw ?? clickedBriteFallback;
+            // Ensure MPB remains clickable even if a renderer/fallback hit-test misses due overlap.
+            if (briteExpanded) {
+              const bottomRow = briteInput.bottomRow ?? [];
+              const mpbColumnIndex = bottomRow.findIndex(
+                (button) => button.top.trim().toUpperCase() === "MPB"
+              );
+              if (mpbColumnIndex >= 0) {
+                const menuOriginX = Math.round(briteInput.x) + DCB_BUTTON_WIDTH_PX + DCB_BUTTON_GAP_PX;
+                const mpbRect = {
+                  x: menuOriginX + mpbColumnIndex * (DCB_BUTTON_WIDTH_PX + DCB_BUTTON_GAP_PX),
+                  y: Math.round(briteInput.y) + DCB_BUTTON_HALF_HEIGHT_PX + DCB_BUTTON_GAP_PX,
+                  width: DCB_BUTTON_WIDTH_PX,
+                  height: DCB_BUTTON_HALF_HEIGHT_PX
+                };
+                if (pointInRect(clickX, clickY, mpbRect)) {
+                  clickedBrite = "brite-mpb";
+                }
+              }
+            }
+            const shouldPrioritizeBrite =
+              briteExpanded &&
+              !ssaFilterExpanded &&
+              !siteMenuExpanded &&
+              clickedBrite !== null;
+
+            const siteMenuHitTester = dcbRenderer as unknown as {
+              hitTestSiteMenu?: (
+                input: DcbSiteMenuInput,
+                x: number,
+                y: number
+              ) => { control: DcbSiteControlHit; siteId: string | null } | null;
+            };
+            const clickedSiteMenu =
+              !dcbAuxSecondPage &&
+              !shouldPrioritizeBrite &&
+              typeof siteMenuHitTester.hitTestSiteMenu === "function"
+                ? siteMenuHitTester.hitTestSiteMenu(getDcbSiteMenuInput(), clickX, clickY)
+                : null;
+            if (clickedSiteMenu?.control === "site-toggle") {
+              clearSiteMenuDoneFlash();
+              siteMenuExpanded = !siteMenuExpanded;
+              if (siteMenuExpanded) {
+                mapsExpanded = false;
+                ssaFilterExpanded = false;
+                briteExpanded = false;
+                clearMapsDoneFlash();
+                clearMapsClearAllFlash();
+                clearSsaFilterDoneFlash();
+                clearBriteDoneFlash();
+                disableWheelTuneModes();
+              }
+              render();
+              return;
+            }
+            if (clickedSiteMenu?.control === "site-done") {
+              clearSiteMenuDoneFlash();
+              siteMenuDoneFlashActive = true;
+              siteMenuDoneFlashTimer = window.setTimeout(() => {
+                siteMenuDoneFlashActive = false;
+                siteMenuDoneFlashTimer = null;
+                siteMenuExpanded = false;
+                if (!disposed) {
+                  render();
+                }
+              }, DCB_DONE_FLASH_MS);
+              render();
+              return;
+            }
+            if (clickedSiteMenu?.control === "site-select" && clickedSiteMenu.siteId) {
+              const nextSelectableSiteId = normalizeSelectableSiteId(clickedSiteMenu.siteId);
+              if (nextSelectableSiteId) {
+                activeDcbSiteId = nextSelectableSiteId;
+                render();
+              }
+              return;
+            }
+            if (clickedSiteMenu?.control === "site-menu") {
+              return;
+            }
+
+            const ssaFilterHitTester = dcbRenderer as unknown as {
+              hitTestSsaFilterMenu?: (
+                input: DcbSsaFilterInput,
+                x: number,
+                y: number
+              ) => DcbSsaFilterControlHit | null;
+            };
+            const clickedSsaFilter =
+              !dcbAuxSecondPage &&
+              !shouldPrioritizeBrite &&
+              typeof ssaFilterHitTester.hitTestSsaFilterMenu === "function"
+                ? ssaFilterHitTester.hitTestSsaFilterMenu(getDcbSsaFilterInput(), clickX, clickY)
+                : null;
+            if (clickedSsaFilter === "ssa-filter-toggle") {
+              clearSsaFilterDoneFlash();
+              ssaFilterExpanded = !ssaFilterExpanded;
+              if (ssaFilterExpanded) {
+                mapsExpanded = false;
+                briteExpanded = false;
+                siteMenuExpanded = false;
+                clearMapsDoneFlash();
+                clearMapsClearAllFlash();
+                clearBriteDoneFlash();
+                clearSiteMenuDoneFlash();
+                disableWheelTuneModes();
+              }
+              render();
+              return;
+            }
+            if (clickedSsaFilter === "ssa-filter-done") {
+              clearSsaFilterDoneFlash();
+              ssaFilterDoneFlashActive = true;
+              ssaFilterDoneFlashTimer = window.setTimeout(() => {
+                ssaFilterDoneFlashActive = false;
+                ssaFilterDoneFlashTimer = null;
+                ssaFilterExpanded = false;
+                if (!disposed) {
+                  render();
+                }
+              }, DCB_DONE_FLASH_MS);
+              render();
+              return;
+            }
+            if (clickedSsaFilter === "ssa-filter-wx") {
+              ssaFilterWxLineVisible = !ssaFilterWxLineVisible;
+              render();
+              return;
+            }
+            if (clickedSsaFilter === "ssa-filter-status") {
+              ssaFilterStatusLineVisible = !ssaFilterStatusLineVisible;
+              render();
+              return;
+            }
+            if (clickedSsaFilter === "ssa-filter-radar") {
+              ssaFilterRadarModeVisible = !ssaFilterRadarModeVisible;
+              render();
+              return;
+            }
+            if (clickedSsaFilter === "ssa-filter-time") {
+              ssaFilterTimeVisible = !ssaFilterTimeVisible;
+              render();
+              return;
+            }
+            if (clickedSsaFilter === "ssa-filter-altstg") {
+              ssaFilterAltimeterVisible = !ssaFilterAltimeterVisible;
+              render();
+              return;
+            }
+            if (clickedSsaFilter === "ssa-filter-alt-fil") {
+              ssaFilterAltitudeFilterLineVisible = !ssaFilterAltitudeFilterLineVisible;
+              render();
+              return;
+            }
+            if (clickedSsaFilter === "ssa-filter-menu") {
+              return;
             }
 
             const mapsHitTester = dcbRenderer as unknown as {
@@ -4419,9 +7235,13 @@ function StarsApp(): ReturnType<typeof createElement> {
               clearMapsDoneFlash();
               clearMapsClearAllFlash();
               clearBriteDoneFlash();
+              clearSsaFilterDoneFlash();
+              clearSiteMenuDoneFlash();
               mapsExpanded = !mapsExpanded;
               if (mapsExpanded) {
                 briteExpanded = false;
+                ssaFilterExpanded = false;
+                siteMenuExpanded = false;
                 disableWheelTuneModes();
               }
               render();
@@ -4484,6 +7304,7 @@ function StarsApp(): ReturnType<typeof createElement> {
                 dcbBrightnessAdjustMode = false;
                 volAdjustMode = false;
                 mapBrightnessAdjustMode = false;
+                tfrBrightnessAdjustMode = false;
                 compassBrightnessAdjustMode = false;
                 listBrightnessAdjustMode = false;
                 toolsBrightnessAdjustMode = false;
@@ -4544,36 +7365,24 @@ function StarsApp(): ReturnType<typeof createElement> {
               return;
             }
 
-            const briteHitTester = dcbRenderer as unknown as {
-              hitTestBrite?: (
-                input: DcbBriteInput,
-                x: number,
-                y: number
-              ) => DcbBriteControlHit | null;
-            };
-            const briteInput = getDcbBriteInput();
-            const clickedBriteRaw =
-              typeof briteHitTester.hitTestBrite === "function"
-                ? briteHitTester.hitTestBrite(briteInput, clickX, clickY)
-                : null;
-            const clickedBriteFallback = hitTestBriteFallback(briteInput, clickX, clickY);
-            const clickedBrite =
-              clickedBriteRaw === "brite-menu"
-                ? clickedBriteFallback ?? clickedBriteRaw
-                : clickedBriteRaw ?? clickedBriteFallback;
             if (clickedBrite === "brite-toggle") {
               clearBriteDoneFlash();
               clearMapsClearAllFlash();
               clearMapsDoneFlash();
+              clearSsaFilterDoneFlash();
+              clearSiteMenuDoneFlash();
               briteExpanded = !briteExpanded;
               if (briteExpanded) {
                 mapsExpanded = false;
+                ssaFilterExpanded = false;
+                siteMenuExpanded = false;
               }
               if (!briteExpanded) {
                 rrBrightnessAdjustMode = false;
                 dcbBrightnessAdjustMode = false;
                 volAdjustMode = false;
                 mapBrightnessAdjustMode = false;
+                tfrBrightnessAdjustMode = false;
                 compassBrightnessAdjustMode = false;
                 listBrightnessAdjustMode = false;
                 toolsBrightnessAdjustMode = false;
@@ -4597,6 +7406,7 @@ function StarsApp(): ReturnType<typeof createElement> {
                 placeMapCenterMode = false;
                 rrBrightnessAdjustMode = false;
                 mapBrightnessAdjustMode = false;
+                tfrBrightnessAdjustMode = false;
                 compassBrightnessAdjustMode = false;
                 listBrightnessAdjustMode = false;
                 toolsBrightnessAdjustMode = false;
@@ -4620,6 +7430,31 @@ function StarsApp(): ReturnType<typeof createElement> {
                 rrBrightnessAdjustMode = false;
                 dcbBrightnessAdjustMode = false;
                 volAdjustMode = false;
+                tfrBrightnessAdjustMode = false;
+                compassBrightnessAdjustMode = false;
+                listBrightnessAdjustMode = false;
+                toolsBrightnessAdjustMode = false;
+                blipBrightnessAdjustMode = false;
+                historyBrightnessAdjustMode = false;
+                wxBrightnessAdjustMode = false;
+                wxStippleBrightnessAdjustMode = false;
+              }
+              render();
+              return;
+            }
+            if (clickedBrite === "brite-mpb") {
+              tfrBrightnessAdjustMode = !tfrBrightnessAdjustMode;
+              if (tfrBrightnessAdjustMode) {
+                resetWheelTuneAccumulators();
+                rangeRingAdjustMode = false;
+                leaderDirectionAdjustMode = false;
+                leaderLengthAdjustMode = false;
+                placeRangeRingCenterMode = false;
+                placeMapCenterMode = false;
+                rrBrightnessAdjustMode = false;
+                dcbBrightnessAdjustMode = false;
+                volAdjustMode = false;
+                mapBrightnessAdjustMode = false;
                 compassBrightnessAdjustMode = false;
                 listBrightnessAdjustMode = false;
                 toolsBrightnessAdjustMode = false;
@@ -4644,6 +7479,7 @@ function StarsApp(): ReturnType<typeof createElement> {
                 dcbBrightnessAdjustMode = false;
                 volAdjustMode = false;
                 mapBrightnessAdjustMode = false;
+                tfrBrightnessAdjustMode = false;
                 compassBrightnessAdjustMode = false;
                 toolsBrightnessAdjustMode = false;
                 blipBrightnessAdjustMode = false;
@@ -4667,6 +7503,7 @@ function StarsApp(): ReturnType<typeof createElement> {
                 dcbBrightnessAdjustMode = false;
                 volAdjustMode = false;
                 mapBrightnessAdjustMode = false;
+                tfrBrightnessAdjustMode = false;
                 compassBrightnessAdjustMode = false;
                 listBrightnessAdjustMode = false;
                 toolsBrightnessAdjustMode = false;
@@ -4690,6 +7527,7 @@ function StarsApp(): ReturnType<typeof createElement> {
                 dcbBrightnessAdjustMode = false;
                 volAdjustMode = false;
                 mapBrightnessAdjustMode = false;
+                tfrBrightnessAdjustMode = false;
                 compassBrightnessAdjustMode = false;
                 listBrightnessAdjustMode = false;
                 blipBrightnessAdjustMode = false;
@@ -4713,6 +7551,7 @@ function StarsApp(): ReturnType<typeof createElement> {
                 dcbBrightnessAdjustMode = false;
                 volAdjustMode = false;
                 mapBrightnessAdjustMode = false;
+                tfrBrightnessAdjustMode = false;
                 compassBrightnessAdjustMode = false;
                 listBrightnessAdjustMode = false;
                 toolsBrightnessAdjustMode = false;
@@ -4736,6 +7575,7 @@ function StarsApp(): ReturnType<typeof createElement> {
                 dcbBrightnessAdjustMode = false;
                 volAdjustMode = false;
                 mapBrightnessAdjustMode = false;
+                tfrBrightnessAdjustMode = false;
                 listBrightnessAdjustMode = false;
                 toolsBrightnessAdjustMode = false;
                 blipBrightnessAdjustMode = false;
@@ -4758,6 +7598,7 @@ function StarsApp(): ReturnType<typeof createElement> {
                 dcbBrightnessAdjustMode = false;
                 volAdjustMode = false;
                 mapBrightnessAdjustMode = false;
+                tfrBrightnessAdjustMode = false;
                 compassBrightnessAdjustMode = false;
                 listBrightnessAdjustMode = false;
                 toolsBrightnessAdjustMode = false;
@@ -4782,6 +7623,7 @@ function StarsApp(): ReturnType<typeof createElement> {
                 dcbBrightnessAdjustMode = false;
                 volAdjustMode = false;
                 mapBrightnessAdjustMode = false;
+                tfrBrightnessAdjustMode = false;
                 compassBrightnessAdjustMode = false;
                 listBrightnessAdjustMode = false;
                 toolsBrightnessAdjustMode = false;
@@ -4805,6 +7647,7 @@ function StarsApp(): ReturnType<typeof createElement> {
                 dcbBrightnessAdjustMode = false;
                 volAdjustMode = false;
                 mapBrightnessAdjustMode = false;
+                tfrBrightnessAdjustMode = false;
                 compassBrightnessAdjustMode = false;
                 listBrightnessAdjustMode = false;
                 toolsBrightnessAdjustMode = false;
@@ -4821,6 +7664,7 @@ function StarsApp(): ReturnType<typeof createElement> {
               dcbBrightnessAdjustMode = false;
               volAdjustMode = false;
               mapBrightnessAdjustMode = false;
+              tfrBrightnessAdjustMode = false;
               compassBrightnessAdjustMode = false;
               listBrightnessAdjustMode = false;
               toolsBrightnessAdjustMode = false;
@@ -4868,6 +7712,7 @@ function StarsApp(): ReturnType<typeof createElement> {
                 dcbBrightnessAdjustMode = false;
                 volAdjustMode = false;
                 mapBrightnessAdjustMode = false;
+                tfrBrightnessAdjustMode = false;
                 compassBrightnessAdjustMode = false;
                 listBrightnessAdjustMode = false;
                 toolsBrightnessAdjustMode = false;
@@ -4891,6 +7736,7 @@ function StarsApp(): ReturnType<typeof createElement> {
                 dcbBrightnessAdjustMode = false;
                 volAdjustMode = false;
                 mapBrightnessAdjustMode = false;
+                tfrBrightnessAdjustMode = false;
                 compassBrightnessAdjustMode = false;
                 listBrightnessAdjustMode = false;
                 toolsBrightnessAdjustMode = false;
@@ -4921,9 +7767,11 @@ function StarsApp(): ReturnType<typeof createElement> {
                 if (dcbAuxSecondPage) {
                   mapsExpanded = false;
                   briteExpanded = false;
+                  ssaFilterExpanded = false;
                   clearMapsDoneFlash();
                   clearMapsClearAllFlash();
                   clearBriteDoneFlash();
+                  clearSsaFilterDoneFlash();
                   placeRangeRingCenterMode = false;
                   placeMapCenterMode = false;
                   if (rrCntrFlashTimer !== null) {
@@ -4934,7 +7782,11 @@ function StarsApp(): ReturnType<typeof createElement> {
                   disableWheelTuneModes();
                 } else {
                   volAdjustMode = false;
+                  historyDotCountAdjustMode = false;
+                  ptlLengthAdjustMode = false;
                   volWheelAccumulatorPx = 0;
+                  historyDotCountWheelAccumulatorPx = 0;
+                  ptlLengthWheelAccumulatorPx = 0;
                 }
               });
               render();
@@ -4952,15 +7804,74 @@ function StarsApp(): ReturnType<typeof createElement> {
                 rrBrightnessAdjustMode = false;
                 dcbBrightnessAdjustMode = false;
                 mapBrightnessAdjustMode = false;
+                tfrBrightnessAdjustMode = false;
                 compassBrightnessAdjustMode = false;
                 listBrightnessAdjustMode = false;
                 toolsBrightnessAdjustMode = false;
                 blipBrightnessAdjustMode = false;
                 historyBrightnessAdjustMode = false;
+                historyDotCountAdjustMode = false;
+                ptlLengthAdjustMode = false;
                 wxBrightnessAdjustMode = false;
                 wxStippleBrightnessAdjustMode = false;
               } else {
                 volWheelAccumulatorPx = 0;
+              }
+              render();
+              return;
+            }
+            if (clickedAuxControl === "history") {
+              historyDotCountAdjustMode = !historyDotCountAdjustMode;
+              if (historyDotCountAdjustMode) {
+                resetWheelTuneAccumulators();
+                rangeRingAdjustMode = false;
+                leaderDirectionAdjustMode = false;
+                leaderLengthAdjustMode = false;
+                placeRangeRingCenterMode = false;
+                placeMapCenterMode = false;
+                rrBrightnessAdjustMode = false;
+                dcbBrightnessAdjustMode = false;
+                volAdjustMode = false;
+                mapBrightnessAdjustMode = false;
+                tfrBrightnessAdjustMode = false;
+                compassBrightnessAdjustMode = false;
+                listBrightnessAdjustMode = false;
+                toolsBrightnessAdjustMode = false;
+                blipBrightnessAdjustMode = false;
+                historyBrightnessAdjustMode = false;
+                ptlLengthAdjustMode = false;
+                wxBrightnessAdjustMode = false;
+                wxStippleBrightnessAdjustMode = false;
+              } else {
+                historyDotCountWheelAccumulatorPx = 0;
+              }
+              render();
+              return;
+            }
+            if (clickedAuxControl === "ptl") {
+              ptlLengthAdjustMode = !ptlLengthAdjustMode;
+              if (ptlLengthAdjustMode) {
+                resetWheelTuneAccumulators();
+                rangeRingAdjustMode = false;
+                leaderDirectionAdjustMode = false;
+                leaderLengthAdjustMode = false;
+                placeRangeRingCenterMode = false;
+                placeMapCenterMode = false;
+                rrBrightnessAdjustMode = false;
+                dcbBrightnessAdjustMode = false;
+                volAdjustMode = false;
+                mapBrightnessAdjustMode = false;
+                tfrBrightnessAdjustMode = false;
+                compassBrightnessAdjustMode = false;
+                listBrightnessAdjustMode = false;
+                toolsBrightnessAdjustMode = false;
+                blipBrightnessAdjustMode = false;
+                historyBrightnessAdjustMode = false;
+                historyDotCountAdjustMode = false;
+                wxBrightnessAdjustMode = false;
+                wxStippleBrightnessAdjustMode = false;
+              } else {
+                ptlLengthWheelAccumulatorPx = 0;
               }
               render();
               return;
@@ -5039,6 +7950,26 @@ function StarsApp(): ReturnType<typeof createElement> {
             return;
           }
 
+          const clickedAircraftId = pickAircraftAtPoint(aircraftHitTargets, clickX, clickY);
+          if (event.altKey && clickedAircraftId) {
+            if (cyanHighlightedAircraftIds.has(clickedAircraftId)) {
+              cyanHighlightedAircraftIds.delete(clickedAircraftId);
+            } else {
+              cyanHighlightedAircraftIds.add(clickedAircraftId);
+            }
+            render();
+            return;
+          }
+          if (clickedAircraftId && altitudeFilteredAircraftIds.has(clickedAircraftId)) {
+            if (altitudeFilterManualRevealAircraftIds.has(clickedAircraftId)) {
+              altitudeFilterManualRevealAircraftIds.delete(clickedAircraftId);
+            } else {
+              altitudeFilterManualRevealAircraftIds.add(clickedAircraftId);
+            }
+            render();
+            return;
+          }
+
           const clickedDatablockId = datablockRendererRef.current?.hitTest(datablockHitRegions, clickX, clickY);
           if (!clickedDatablockId) {
             return;
@@ -5076,6 +8007,23 @@ function StarsApp(): ReturnType<typeof createElement> {
           const pointerX = event.clientX - rect.left;
           const pointerY = event.clientY - rect.top;
           updateCanvasCursorAtPoint(pointerX, pointerY);
+
+          const pointerInScope = pointInScopeRect(pointerX, pointerY, getScopeRect());
+          if (rblCommandActive && rblFirstSelection && !rblSecondSelection) {
+            const nextPreviewCursor = pointerInScope ? { x: pointerX, y: pointerY } : null;
+            const previewChanged =
+              (rblPreviewCursorPx === null) !== (nextPreviewCursor === null) ||
+              (rblPreviewCursorPx !== null &&
+                nextPreviewCursor !== null &&
+                (rblPreviewCursorPx.x !== nextPreviewCursor.x ||
+                  rblPreviewCursorPx.y !== nextPreviewCursor.y));
+            if (previewChanged) {
+              rblPreviewCursorPx = nextPreviewCursor;
+              render();
+            }
+          } else if (rblPreviewCursorPx !== null) {
+            rblPreviewCursorPx = null;
+          }
 
           if (!videoMapPanDragActive || !videoMapPanDragLast) {
             return;
@@ -5214,6 +8162,40 @@ function StarsApp(): ReturnType<typeof createElement> {
             }
             return;
           }
+          if (historyDotCountAdjustMode) {
+            const consumed = consumeWheelStepAccumulator(historyDotCountWheelAccumulatorPx, deltaPx);
+            historyDotCountWheelAccumulatorPx = consumed.accumulatorPx;
+            if (consumed.steps === 0) {
+              return;
+            }
+            const nextHistoryDotCount = Math.min(
+              HISTORY_DOTS_MAX_COUNT,
+              Math.max(
+                HISTORY_DOTS_MIN_COUNT,
+                historyDotCount + consumed.steps * HISTORY_DOTS_STEP_COUNT
+              )
+            );
+            if (nextHistoryDotCount !== historyDotCount) {
+              historyDotCount = nextHistoryDotCount;
+              render();
+            }
+            return;
+          }
+          if (ptlLengthAdjustMode) {
+            const consumed = consumeWheelStepAccumulator(ptlLengthWheelAccumulatorPx, deltaPx);
+            ptlLengthWheelAccumulatorPx = consumed.accumulatorPx;
+            if (consumed.steps === 0) {
+              return;
+            }
+            const nextPtlLengthMinutes = clampPtlLengthMinutes(
+              ptlLengthMinutes + consumed.steps * PTL_LENGTH_STEP_MINUTES
+            );
+            if (nextPtlLengthMinutes !== ptlLengthMinutes) {
+              ptlLengthMinutes = nextPtlLengthMinutes;
+              render();
+            }
+            return;
+          }
           if (mapBrightnessAdjustMode) {
             const consumed = consumeWheelStepAccumulator(mapBrightnessWheelAccumulatorPx, deltaPx);
             mapBrightnessWheelAccumulatorPx = consumed.accumulatorPx;
@@ -5226,6 +8208,22 @@ function StarsApp(): ReturnType<typeof createElement> {
             );
             if (nextBrightness !== mapBrightnessPercent) {
               mapBrightnessPercent = nextBrightness;
+              render();
+            }
+            return;
+          }
+          if (tfrBrightnessAdjustMode) {
+            const consumed = consumeWheelStepAccumulator(tfrBrightnessWheelAccumulatorPx, deltaPx);
+            tfrBrightnessWheelAccumulatorPx = consumed.accumulatorPx;
+            if (consumed.steps === 0) {
+              return;
+            }
+            const nextBrightness = Math.min(
+              100,
+              Math.max(0, tfrBrightnessPercent + consumed.steps * TFR_BRIGHTNESS_STEP_PERCENT)
+            );
+            if (nextBrightness !== tfrBrightnessPercent) {
+              tfrBrightnessPercent = nextBrightness;
               render();
             }
             return;
@@ -5456,14 +8454,16 @@ function StarsApp(): ReturnType<typeof createElement> {
         const qnhTimer = window.setInterval(() => void refreshSsaQnh(), SSA_QNH_REFRESH_MS);
         const aircraftTimer = window.setInterval(() => void refreshCoastSuspend(), AIRCRAFT_REFRESH_MS);
         const wxTimer = window.setInterval(() => void refreshWxRadar(true), WX_REFRESH_MS);
+        const tfrTimer = window.setInterval(() => void refreshTfrs(), TFR_REFRESH_MS);
         resize();
         void refreshSsaQnh();
         void refreshTraconMetadata();
         void refreshCoastSuspend();
         void refreshWxRadar();
+        void refreshTfrs();
         connectFlightRulesStream();
         console.info(
-          "STARS React demo running. Use Left/Right arrows to rotate compass, R to reset, F7 then S then click in scope to move SSA, F7 then P then Enter to toggle Tower list, F7 then P then click in scope to place Tower list, F7 then T then Enter to toggle Flight Plan list, F7 then T then click in scope to place Flight Plan list, F7 then T then M then Enter to toggle LA/CA/MCI list, F7 then T then M then click in scope to place LA/CA/MCI list, F7 then T then N then Enter to toggle sign-on list, F7 then T then N then click in scope to place sign-on list, F7 then T then C then Enter to toggle COAST/SUSPEND list, F7 then T then C then click in scope to place COAST/SUSPEND list, F7 then T then V then Enter to toggle VFR, F7 then T then V then click in scope to place VFR, and click MAP tiles to toggle videomaps."
+          "STARS React demo running. Use Left/Right arrows to rotate compass, R to reset, F7 then S then click in scope to move SSA, F7 then D then * then click in scope/blip to preview coordinates (clears with Esc), F7 then F then {###}{###}{###}{###} then Enter to set datablock altitude filters (N99 means 000), F7 then R then click a radar blip to toggle PTL for that track, F7 then P then Enter to toggle the current Tower list, F7 then P then {id} then Enter to show Tower list for airport id, F7 then P then {id} then click anywhere on screen to place that Tower list, F7 then P then {id} then {x} then Enter to show x total Tower lines (x-1 aircraft rows), F7 then T then Enter to toggle Flight Plan list, F7 then T then click in scope to place Flight Plan list, F7 then T then M then Enter to toggle LA/CA/MCI list, F7 then T then M then click in scope to place LA/CA/MCI list, F7 then T then N then Enter to toggle sign-on list, F7 then T then N then click in scope to place sign-on list, F7 then T then C then Enter to toggle COAST/SUSPEND list, F7 then T then C then click in scope to place COAST/SUSPEND list, F7 then T then V then Enter to toggle VFR, F7 then T then V then click in scope to place VFR, F7 then T then R then A then Enter to toggle GEO RESTRICTIONS, or F7 then T then R then A then click in scope to place it, F12 then E then {id} then Enter to enable a TFR, F12 then I then {id} then Enter to disable a TFR, F12 then {id} then T then Enter to toggle TFR text visibility, F12 then {id} then T then \\ then Enter to toggle blinking TFR text visibility, F12 then {id} then T then {text} then Enter to set TFR text, and click MAP tiles to toggle videomaps."
         );
 
         cleanup = () => {
@@ -5503,6 +8503,7 @@ function StarsApp(): ReturnType<typeof createElement> {
           window.clearInterval(qnhTimer);
           window.clearInterval(aircraftTimer);
           window.clearInterval(wxTimer);
+          window.clearInterval(tfrTimer);
           if (wxZoomInteractionTimer !== null) {
             window.clearTimeout(wxZoomInteractionTimer);
             wxZoomInteractionTimer = null;
@@ -5526,6 +8527,14 @@ function StarsApp(): ReturnType<typeof createElement> {
           if (briteDoneFlashTimer !== null) {
             window.clearTimeout(briteDoneFlashTimer);
             briteDoneFlashTimer = null;
+          }
+          if (ssaFilterDoneFlashTimer !== null) {
+            window.clearTimeout(ssaFilterDoneFlashTimer);
+            ssaFilterDoneFlashTimer = null;
+          }
+          if (siteMenuDoneFlashTimer !== null) {
+            window.clearTimeout(siteMenuDoneFlashTimer);
+            siteMenuDoneFlashTimer = null;
           }
           if (shiftFlashTimer !== null) {
             window.clearTimeout(shiftFlashTimer);

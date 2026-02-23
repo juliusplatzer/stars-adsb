@@ -1,16 +1,25 @@
 import { readFile } from "node:fs/promises";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
-import { resolve } from "node:path";
-import { URL } from "node:url";
+import { dirname, resolve } from "node:path";
+import { URL, fileURLToPath } from "node:url";
+import { startAdsbClient } from "./adsb_client.js";
+import { startTfrNotamsWorker, type TfrsIngestPayload } from "./tfrs_notams.js";
 
 const HOST = process.env.HOST?.trim() || "127.0.0.1";
 const PORT = Number.parseInt(process.env.PORT ?? "8080", 10);
 const MAX_JSON_BYTES = parsePositiveIntEnv("WX_POST_MAX_BYTES", 40_000_000);
 const QNH_MAX_JSON_BYTES = parsePositiveIntEnv("QNH_POST_MAX_BYTES", 2_000_000);
+const AIRCRAFT_MAX_JSON_BYTES = parsePositiveIntEnv("AIRCRAFT_POST_MAX_BYTES", 8_000_000);
+const TFRS_MAX_JSON_BYTES = parsePositiveIntEnv("TFRS_POST_MAX_BYTES", 8_000_000);
+const TAIS_MAX_JSON_BYTES = parsePositiveIntEnv("TAIS_POST_MAX_BYTES", 8_000_000);
 const INGEST_TOKEN = (process.env.ITWS_INGEST_TOKEN ?? "").trim();
 const QNH_INGEST_TOKEN = (process.env.QNH_INGEST_TOKEN ?? "").trim();
+const AIRCRAFT_INGEST_TOKEN = (process.env.AIRCRAFT_INGEST_TOKEN ?? "").trim();
+const TFRS_INGEST_TOKEN = (process.env.TFRS_INGEST_TOKEN ?? "").trim();
+const TAIS_INGEST_TOKEN = (process.env.TAIS_INGEST_TOKEN ?? "").trim();
 
 const MAIN_ICAO = normalizeIcao(process.env.MAIN_ICAO) ?? "KJFK";
+const POS = normalizeControllerPosition(process.env.POS) ?? "2A";
 const QNH_REFRESH_MS = parsePositiveIntEnv("QNH_REFRESH_MS", 60_000);
 const QNH_SOURCE_TIMEOUT_MS = parsePositiveIntEnv("QNH_SOURCE_TIMEOUT_MS", 8_000);
 const QNH_SOURCE_BASE_URL =
@@ -18,6 +27,10 @@ const QNH_SOURCE_BASE_URL =
 const QNH_POST_URL =
   (process.env.QNH_POST_URL ?? `http://${HOST}:${PORT}/api/wx/qnh`).trim();
 const TRACON_CONFIG_PATH = (process.env.TRACON_CONFIG_PATH ?? "").trim();
+const MODULE_DIR = dirname(fileURLToPath(import.meta.url));
+const RECAT_CWT_PATH = resolve(MODULE_DIR, "../../data/recat_cwt.json");
+const TAIS_CACHE_STALE_MS = parsePositiveIntEnv("TAIS_CACHE_STALE_MS", 5 * 60 * 1000);
+const AIRCRAFT_DESTINATION_DEFAULT = "XXX";
 
 let latestRadarPayload: unknown = null;
 let latestRadarUpdatedAtMs = 0;
@@ -27,6 +40,18 @@ let latestQnhUpdatedAtMs = 0;
 const qnhByIcao = new Map<string, QnhStationRecord>();
 let qnhRefreshInFlight = false;
 let qnhTargetsPromise: Promise<string[]> | null = null;
+
+let latestAircraftPosPayload: AircraftPositionIngestPayload | null = null;
+let latestAircraftPosUpdatedAtMs = 0;
+
+let latestAircraftTaisPayload: unknown = null;
+let latestAircraftTaisUpdatedAtMs = 0;
+const taisByCallsign = new Map<string, TaisCacheEntry>();
+let recatCwtByTypePromise: Promise<Map<string, string>> | null = null;
+let recatCwtLoadWarned = false;
+
+let latestTfrsPayload: TfrsIngestPayload | null = null;
+let latestTfrsUpdatedAtMs = 0;
 
 interface RadarCenter {
   lat: number;
@@ -45,8 +70,66 @@ interface QnhIngestPayload {
   updatedAtMs: number;
   source: string;
   mainIcao: string;
+  positionId: string;
   requestedIcaos: string[];
   stations: QnhStationRecord[];
+}
+
+interface AircraftPositionRecord {
+  callsign: string | null;
+  aircraftType: string | null;
+  groundspeedKts: number | null;
+  position: { lat: number; lon: number };
+  trackDeg: number | null;
+  altitudeAmslFt: number | null;
+  wakeCategory: string | null;
+  squawk: string | null;
+  seenPosSeconds: number | null;
+  destinationIcao: string | null;
+  destinationIata: string | null;
+  history: Array<{ lat: number; lon: number }>;
+}
+
+interface AircraftPositionIngestPayload {
+  updatedAtMs: number;
+  source: string;
+  upstreamUrl?: string;
+  aircraft: AircraftPositionRecord[];
+}
+
+interface TaisCacheEntry {
+  callsign: string;
+  cps: string | null;
+  destinationIcao: string | null;
+  destinationIata: string | null;
+  updatedAtMs: number;
+}
+
+interface AircraftAllRecord {
+  id: string;
+  callsign: string | null;
+  position: { lat: number; lon: number };
+  history: Array<{ lat: number; lon: number }>;
+  previousPositions: Array<{ lat: number; lon: number }>;
+  aircraftType: string | null;
+  aircraftTypeIcao: string | null;
+  cwt: string | null;
+  wakeCategory: string | null;
+  controllerPosition: string | null;
+  cps: string | null;
+  altitudeAmslFt: number | null;
+  groundspeedKts: number | null;
+  destinationIata: string;
+  destinationIcao: string | null;
+  trackDeg: number | null;
+  squawk: string | null;
+  seenPosSeconds: number | null;
+}
+
+interface AircraftAllPayload {
+  updatedAtMs: number;
+  source: string;
+  aircraft: AircraftAllRecord[];
 }
 
 interface TraconAirportConfig {
@@ -101,6 +184,66 @@ function normalizeIcao(value: unknown): string | null {
   return /^[A-Z0-9]{4}$/.test(upper) ? upper : null;
 }
 
+function normalizeIata(value: unknown): string | null {
+  const raw = asString(value);
+  if (!raw) {
+    return null;
+  }
+  const upper = raw.toUpperCase();
+  return /^[A-Z0-9]{3,4}$/.test(upper) ? upper : null;
+}
+
+function normalizeCallsign(value: unknown): string | null {
+  const raw = asString(value);
+  if (!raw) {
+    return null;
+  }
+  return raw.toUpperCase();
+}
+
+function normalizeAircraftType(value: unknown): string | null {
+  const raw = asString(value);
+  if (!raw) {
+    return null;
+  }
+  return raw.toUpperCase();
+}
+
+function normalizeWakeCategory(value: unknown): string | null {
+  const raw = asString(value);
+  if (!raw) {
+    return null;
+  }
+  return raw.toUpperCase();
+}
+
+function normalizeControllerPosition(value: unknown): string | null {
+  const raw = asString(value);
+  if (!raw) {
+    return null;
+  }
+  return raw.toUpperCase();
+}
+
+function normalizeSquawk(value: unknown): string | null {
+  const raw = asString(value);
+  if (!raw) {
+    return null;
+  }
+  const normalized = raw.toUpperCase().replace(/\s+/g, "");
+  return normalized.length > 0 ? normalized : null;
+}
+
+function deriveIataFromIcao(icao: string | null): string | null {
+  if (!icao) {
+    return null;
+  }
+  if (icao.startsWith("K")) {
+    return icao.slice(1);
+  }
+  return null;
+}
+
 function normalizeIcaoList(values: unknown[]): string[] {
   const out: string[] = [];
   const seen = new Set<string>();
@@ -131,7 +274,10 @@ function mmHgToInHg(mmHg: number): number {
 function setCorsHeaders(res: ServerResponse): void {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type,X-WX-Token,X-QNH-Token");
+  res.setHeader(
+    "Access-Control-Allow-Headers",
+    "Content-Type,X-WX-Token,X-QNH-Token,X-Aircraft-Token,X-TFRS-Token,X-TAIS-Token"
+  );
 }
 
 function writeJson(res: ServerResponse, statusCode: number, payload: unknown): void {
@@ -176,6 +322,240 @@ function parseFiniteNumber(value: string | null, fallback: number): number {
   return Number.isFinite(parsed) ? parsed : fallback;
 }
 
+function inferUpdatedAtMs(payload: unknown): number {
+  const root = asObject(payload);
+  if (!root) {
+    return Date.now();
+  }
+  const updatedAtRaw = asFiniteNumber(root.updatedAtMs);
+  if (updatedAtRaw !== null && updatedAtRaw > 0) {
+    return Math.floor(updatedAtRaw);
+  }
+  return Date.now();
+}
+
+function parseTimestampMs(value: unknown): number | null {
+  const numeric = asFiniteNumber(value);
+  if (numeric !== null && numeric > 0) {
+    return Math.floor(numeric);
+  }
+  const text = asString(value);
+  if (!text) {
+    return null;
+  }
+  const parsed = Date.parse(text);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    return null;
+  }
+  return Math.floor(parsed);
+}
+
+function extractTaisRecordObjects(payload: unknown): Array<Record<string, unknown>> {
+  if (Array.isArray(payload)) {
+    return payload
+      .map((item) => asObject(item))
+      .filter((item): item is Record<string, unknown> => item !== null);
+  }
+
+  const root = asObject(payload);
+  if (!root) {
+    return [];
+  }
+
+  const recordsRaw = Array.isArray(root.records) ? root.records : [];
+  const records = recordsRaw
+    .map((item) => asObject(item))
+    .filter((item): item is Record<string, unknown> => item !== null);
+  if (records.length > 0) {
+    return records;
+  }
+
+  return [root];
+}
+
+function normalizeTaisRecord(
+  record: Record<string, unknown>,
+  fallbackUpdatedAtMs: number
+): TaisCacheEntry | null {
+  const callsign = normalizeCallsign(record.callsign);
+  if (!callsign) {
+    return null;
+  }
+
+  const destinationIcao = normalizeIcao(record.destinationIcao);
+  const destinationIata =
+    normalizeIata(record.destinationIata) ?? deriveIataFromIcao(destinationIcao);
+
+  const updatedAtMs =
+    parseTimestampMs(record.updatedAtMs) ??
+    parseTimestampMs(record.receivedAt) ??
+    fallbackUpdatedAtMs;
+
+  return {
+    callsign,
+    cps: normalizeControllerPosition(record.cps),
+    destinationIcao,
+    destinationIata,
+    updatedAtMs
+  };
+}
+
+function pruneStaleTaisCache(nowMs: number): void {
+  for (const [callsign, entry] of taisByCallsign.entries()) {
+    if (nowMs - entry.updatedAtMs > TAIS_CACHE_STALE_MS) {
+      taisByCallsign.delete(callsign);
+    }
+  }
+}
+
+function updateTaisCacheFromPayload(payload: unknown): void {
+  const nowMs = Date.now();
+  pruneStaleTaisCache(nowMs);
+  const fallbackUpdatedAtMs = inferUpdatedAtMs(payload);
+  const records = extractTaisRecordObjects(payload);
+
+  for (let i = 0; i < records.length; i += 1) {
+    const normalized = normalizeTaisRecord(records[i], fallbackUpdatedAtMs);
+    if (!normalized) {
+      continue;
+    }
+
+    const previous = taisByCallsign.get(normalized.callsign) ?? null;
+    taisByCallsign.set(normalized.callsign, {
+      callsign: normalized.callsign,
+      cps: normalized.cps ?? previous?.cps ?? null,
+      destinationIcao: normalized.destinationIcao ?? previous?.destinationIcao ?? null,
+      destinationIata: normalized.destinationIata ?? previous?.destinationIata ?? null,
+      updatedAtMs: Math.max(normalized.updatedAtMs, previous?.updatedAtMs ?? 0)
+    });
+  }
+}
+
+async function loadRecatCwtByType(): Promise<Map<string, string>> {
+  try {
+    const raw = await readFile(RECAT_CWT_PATH, "utf8");
+    const parsed = JSON.parse(raw) as unknown;
+    const root = asObject(parsed);
+    const aircraft = asObject(root?.aircraft);
+    const out = new Map<string, string>();
+
+    if (!aircraft) {
+      return out;
+    }
+
+    for (const [designatorRaw, value] of Object.entries(aircraft)) {
+      const designator = normalizeAircraftType(designatorRaw);
+      const entry = asObject(value);
+      const cwt = asString(entry?.cwt);
+      if (!designator || !cwt) {
+        continue;
+      }
+      out.set(designator, cwt.toUpperCase());
+    }
+
+    return out;
+  } catch (error) {
+    if (!recatCwtLoadWarned) {
+      recatCwtLoadWarned = true;
+      console.warn(`Failed to load RECAT CWT lookup at ${RECAT_CWT_PATH}:`, error);
+    }
+    return new Map<string, string>();
+  }
+}
+
+async function getRecatCwtByType(): Promise<Map<string, string>> {
+  if (!recatCwtByTypePromise) {
+    recatCwtByTypePromise = loadRecatCwtByType();
+  }
+  return recatCwtByTypePromise;
+}
+
+function resolveMergedDestinationIata(
+  adsbDestinationIata: string | null,
+  taisEntry: TaisCacheEntry | null
+): string {
+  const taisDestination =
+    taisEntry?.destinationIata ?? deriveIataFromIcao(taisEntry?.destinationIcao ?? null);
+  if (taisDestination) {
+    return taisDestination;
+  }
+  if (adsbDestinationIata) {
+    return adsbDestinationIata;
+  }
+  return AIRCRAFT_DESTINATION_DEFAULT;
+}
+
+function resolveAircraftCwt(
+  aircraftType: string | null,
+  wakeCategory: string | null,
+  recatCwtByType: Map<string, string>
+): string | null {
+  if (aircraftType) {
+    const matched = recatCwtByType.get(aircraftType);
+    if (matched) {
+      return matched;
+    }
+  }
+  return wakeCategory;
+}
+
+async function buildAircraftAllPayload(): Promise<AircraftAllPayload> {
+  const adsbPayload = latestAircraftPosPayload;
+  if (!adsbPayload) {
+    return {
+      updatedAtMs: Date.now(),
+      source: "none",
+      aircraft: []
+    };
+  }
+
+  const nowMs = Date.now();
+  pruneStaleTaisCache(nowMs);
+  const recatCwtByType = await getRecatCwtByType();
+  const idCounts = new Map<string, number>();
+  const aircraft: AircraftAllRecord[] = [];
+
+  for (let i = 0; i < adsbPayload.aircraft.length; i += 1) {
+    const item = adsbPayload.aircraft[i];
+    const callsign = normalizeCallsign(item.callsign);
+    const aircraftType = normalizeAircraftType(item.aircraftType);
+    const wakeCategory = normalizeWakeCategory(item.wakeCategory);
+    const taisEntry = callsign ? taisByCallsign.get(callsign) ?? null : null;
+    const cwt = resolveAircraftCwt(aircraftType, wakeCategory, recatCwtByType);
+    const idBase = callsign ?? `AC-${i + 1}`;
+    const duplicateCount = idCounts.get(idBase) ?? 0;
+    idCounts.set(idBase, duplicateCount + 1);
+    const id = duplicateCount === 0 ? idBase : `${idBase}#${duplicateCount + 1}`;
+
+    aircraft.push({
+      id,
+      callsign,
+      position: item.position,
+      history: item.history,
+      previousPositions: item.history,
+      aircraftType,
+      aircraftTypeIcao: aircraftType,
+      cwt,
+      wakeCategory: cwt,
+      controllerPosition: taisEntry?.cps ?? null,
+      cps: taisEntry?.cps ?? null,
+      altitudeAmslFt: item.altitudeAmslFt,
+      groundspeedKts: item.groundspeedKts,
+      destinationIata: resolveMergedDestinationIata(normalizeIata(item.destinationIata), taisEntry),
+      destinationIcao: item.destinationIcao,
+      trackDeg: item.trackDeg,
+      squawk: item.squawk,
+      seenPosSeconds: item.seenPosSeconds
+    });
+  }
+
+  return {
+    updatedAtMs: adsbPayload.updatedAtMs,
+    source: adsbPayload.source,
+    aircraft
+  };
+}
+
 function buildFallbackRadarPayload(center: RadarCenter, radiusNm: number): Record<string, unknown> {
   return {
     updatedAtMs: Date.now(),
@@ -200,6 +580,206 @@ function buildFallbackRadarPayload(center: RadarCenter, radiusNm: number): Recor
       dyM: 1852,
       rotationDeg: 0
     }
+  };
+}
+
+function normalizeAircraftPositionIngestPayload(input: unknown): AircraftPositionIngestPayload | null {
+  const root = asObject(input);
+  if (!root) {
+    return null;
+  }
+
+  const aircraftRaw = Array.isArray(root.aircraft) ? root.aircraft : null;
+  if (!aircraftRaw) {
+    return null;
+  }
+
+  const aircraft: AircraftPositionRecord[] = [];
+  for (let i = 0; i < aircraftRaw.length; i += 1) {
+    const item = asObject(aircraftRaw[i]);
+    if (!item) {
+      continue;
+    }
+
+    const position = asObject(item.position);
+    const lat = asFiniteNumber(position?.lat ?? item.lat);
+    const lon = asFiniteNumber(position?.lon ?? item.lon);
+    if (lat === null || lon === null || Math.abs(lat) > 90 || Math.abs(lon) > 180) {
+      continue;
+    }
+
+    const groundspeedRaw = asFiniteNumber(item.groundspeedKts ?? item.groundspeed ?? item.gs);
+    const trackRaw = asFiniteNumber(item.trackDeg ?? item.track);
+    const altitudeRaw = asFiniteNumber(item.altitudeAmslFt ?? item.altitudeFt ?? item.alt_baro);
+    const seenPosRaw = asFiniteNumber(item.seenPosSeconds ?? item.seenPos ?? item.seen_pos);
+    const wakeCategory = normalizeWakeCategory(
+      item.wakeCategory ?? item.wake_category ?? item.wtc ?? item.wake ?? item.category
+    );
+    const squawk = normalizeSquawk(item.squawk ?? item.beaconCode ?? item.beacon_code);
+    const destinationIcao = normalizeIcao(item.destinationIcao ?? item.destination_icao ?? item.destination);
+    const destinationIata = normalizeIata(item.destinationIata ?? item.destination_iata);
+    const rawHistory = Array.isArray(item.history) ? item.history : [];
+    const history: Array<{ lat: number; lon: number }> = [];
+    const historyStart = Math.max(0, rawHistory.length - 9);
+    for (let historyIndex = historyStart; historyIndex < rawHistory.length; historyIndex += 1) {
+      const historyPoint = asObject(rawHistory[historyIndex]);
+      if (!historyPoint) {
+        continue;
+      }
+      const historyLat = asFiniteNumber(historyPoint.lat);
+      const historyLon = asFiniteNumber(historyPoint.lon);
+      if (
+        historyLat === null ||
+        historyLon === null ||
+        Math.abs(historyLat) > 90 ||
+        Math.abs(historyLon) > 180
+      ) {
+        continue;
+      }
+      history.push({
+        lat: historyLat,
+        lon: historyLon
+      });
+    }
+
+    aircraft.push({
+      callsign: normalizeCallsign(item.callsign),
+      aircraftType: normalizeAircraftType(
+        item.aircraftType ?? item.aircraftTypeIcao ?? item.type ?? item.aircraft_type ?? item.t
+      ),
+      groundspeedKts: groundspeedRaw !== null && groundspeedRaw >= 0 ? roundTo(groundspeedRaw, 1) : null,
+      position: {
+        lat,
+        lon
+      },
+      trackDeg:
+        trackRaw !== null
+          ? roundTo((((trackRaw % 360) + 360) % 360), 1)
+          : null,
+      altitudeAmslFt: altitudeRaw !== null && altitudeRaw >= 0 ? roundTo(altitudeRaw, 0) : null,
+      wakeCategory,
+      squawk,
+      seenPosSeconds: seenPosRaw !== null && seenPosRaw >= 0 ? roundTo(seenPosRaw, 1) : null,
+      destinationIcao,
+      destinationIata,
+      history
+    });
+  }
+
+  const updatedAtRaw = asFiniteNumber(root.updatedAtMs);
+  const updatedAtMs = updatedAtRaw !== null && updatedAtRaw > 0 ? Math.floor(updatedAtRaw) : Date.now();
+
+  return {
+    updatedAtMs,
+    source: asString(root.source) ?? "unknown",
+    upstreamUrl: asString(root.upstreamUrl) ?? undefined,
+    aircraft
+  };
+}
+
+function normalizeTfrsIngestPayload(input: unknown): TfrsIngestPayload | null {
+  const root = asObject(input);
+  if (!root) {
+    return null;
+  }
+
+  const tfrsRaw = Array.isArray(root.tfrs) ? root.tfrs : null;
+  if (!tfrsRaw) {
+    return null;
+  }
+
+  const tfrs: TfrsIngestPayload["tfrs"] = [];
+  const seenIds = new Set<string>();
+  for (let i = 0; i < tfrsRaw.length; i += 1) {
+    const tfr = asObject(tfrsRaw[i]);
+    if (!tfr) {
+      continue;
+    }
+
+    const id = asString(tfr.id);
+    if (!id || seenIds.has(id)) {
+      continue;
+    }
+
+    const areasRaw = Array.isArray(tfr.areas) ? tfr.areas : [];
+    const areas: TfrsIngestPayload["tfrs"][number]["areas"] = [];
+    for (let areaIndex = 0; areaIndex < areasRaw.length; areaIndex += 1) {
+      const area = asObject(areasRaw[areaIndex]);
+      if (!area) {
+        continue;
+      }
+      const pointsRaw = Array.isArray(area.points) ? area.points : [];
+      const points: Array<{ lat: number; lon: number }> = [];
+      for (let pointIndex = 0; pointIndex < pointsRaw.length; pointIndex += 1) {
+        const point = asObject(pointsRaw[pointIndex]);
+        if (!point) {
+          continue;
+        }
+        const lat = asFiniteNumber(point.lat);
+        const lon = asFiniteNumber(point.lon);
+        if (
+          lat === null ||
+          lon === null ||
+          Math.abs(lat) > 90 ||
+          Math.abs(lon) > 180
+        ) {
+          continue;
+        }
+        points.push({ lat, lon });
+      }
+      if (points.length < 3) {
+        continue;
+      }
+      areas.push({
+        areaId: asString(area.areaId) ?? null,
+        points
+      });
+    }
+
+    if (areas.length === 0) {
+      continue;
+    }
+
+    const upperRaw = asFiniteNumber(tfr.upperFt);
+    const lowerRaw = asFiniteNumber(tfr.lowerFt);
+    tfrs.push({
+      id,
+      localName: asString(tfr.localName) ?? null,
+      facility: asString(tfr.facility)?.toUpperCase() ?? null,
+      codeType: asString(tfr.codeType) ?? null,
+      effective: asString(tfr.effective) ?? null,
+      expire: asString(tfr.expire) ?? null,
+      lowerFt: lowerRaw !== null ? Math.round(lowerRaw) : null,
+      upperFt: upperRaw !== null ? Math.round(upperRaw) : null,
+      sourceXmlUrl: asString(tfr.sourceXmlUrl) ?? "",
+      areas
+    });
+    seenIds.add(id);
+  }
+
+  const idsRaw = Array.isArray(root.ids) ? root.ids : [];
+  const ids: string[] = [];
+  const seenPayloadIds = new Set<string>();
+  for (let i = 0; i < idsRaw.length; i += 1) {
+    const id = asString(idsRaw[i]);
+    if (!id || seenPayloadIds.has(id)) {
+      continue;
+    }
+    ids.push(id);
+    seenPayloadIds.add(id);
+  }
+
+  const updatedAtRaw = asFiniteNumber(root.updatedAtMs);
+  const updatedAtMs = updatedAtRaw !== null && updatedAtRaw > 0 ? Math.floor(updatedAtRaw) : Date.now();
+
+  return {
+    updatedAtMs,
+    source: asString(root.source) ?? "unknown",
+    artcc: asString(root.artcc)?.toUpperCase() ?? "",
+    tracon: asString(root.tracon)?.toUpperCase() ?? "",
+    mainIcao: normalizeIcao(root.mainIcao) ?? MAIN_ICAO,
+    ids: ids.length > 0 ? ids : tfrs.map((tfr) => tfr.id),
+    tfrs
   };
 }
 
@@ -436,6 +1016,7 @@ function buildQnhIngestPayload(requestedIcaos: string[], stations: QnhStationRec
     updatedAtMs: Date.now(),
     source: "aviationweather.gov/api/data/metar",
     mainIcao: MAIN_ICAO,
+    positionId: POS,
     requestedIcaos,
     stations
   };
@@ -501,6 +1082,7 @@ function normalizeQnhIngestPayload(input: unknown): QnhIngestPayload | null {
     updatedAtMs,
     source: asString(root.source) ?? "unknown",
     mainIcao: normalizeIcao(root.mainIcao) ?? MAIN_ICAO,
+    positionId: normalizeControllerPosition(root.positionId) ?? POS,
     requestedIcaos: finalRequested,
     stations
   };
@@ -606,6 +1188,9 @@ const server = createServer(async (req, res) => {
       service: "vstars-server",
       radarUpdatedAtMs: latestRadarUpdatedAtMs || null,
       qnhUpdatedAtMs: latestQnhUpdatedAtMs || null,
+      aircraftUpdatedAtMs: latestAircraftPosUpdatedAtMs || null,
+      taisUpdatedAtMs: latestAircraftTaisUpdatedAtMs || null,
+      tfrsUpdatedAtMs: latestTfrsUpdatedAtMs || null,
       mainIcao: MAIN_ICAO
     });
     return;
@@ -697,6 +1282,7 @@ const server = createServer(async (req, res) => {
         updatedAtMs: Date.now(),
         source: "none",
         mainIcao: MAIN_ICAO,
+        positionId: POS,
         requestedIcaos: [MAIN_ICAO],
         stations: []
       } satisfies QnhIngestPayload);
@@ -720,6 +1306,170 @@ const server = createServer(async (req, res) => {
     return;
   }
 
+  if (pathname === "/api/aircraft/all") {
+    if (method !== "GET") {
+      writeJson(res, 405, { error: "Method not allowed." });
+      return;
+    }
+
+    try {
+      const payload = await buildAircraftAllPayload();
+      writeJson(res, 200, payload);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Failed to build aircraft feed.";
+      writeJson(res, 500, { error: message });
+    }
+    return;
+  }
+
+  if (pathname === "/api/aircraft/pos") {
+    if (method === "POST") {
+      if (AIRCRAFT_INGEST_TOKEN.length > 0) {
+        const token = getHeader(req, "x-aircraft-token").trim();
+        if (token !== AIRCRAFT_INGEST_TOKEN) {
+          writeJson(res, 401, { error: "Invalid aircraft ingest token." });
+          return;
+        }
+      }
+
+      try {
+        const payload = await readJsonBody(req, AIRCRAFT_MAX_JSON_BYTES);
+        const normalized = normalizeAircraftPositionIngestPayload(payload);
+        if (!normalized) {
+          writeJson(res, 400, { error: "Invalid aircraft payload." });
+          return;
+        }
+
+        latestAircraftPosPayload = normalized;
+        latestAircraftPosUpdatedAtMs = normalized.updatedAtMs;
+        writeJson(res, 202, {
+          ok: true,
+          storedAtMs: normalized.updatedAtMs,
+          aircraft: normalized.aircraft.length
+        });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "Invalid JSON payload.";
+        writeJson(res, 400, { error: message });
+      }
+      return;
+    }
+
+    if (method === "GET") {
+      if (latestAircraftPosPayload) {
+        writeJson(res, 200, latestAircraftPosPayload);
+        return;
+      }
+
+      writeJson(res, 200, {
+        updatedAtMs: Date.now(),
+        source: "none",
+        aircraft: []
+      } satisfies AircraftPositionIngestPayload);
+      return;
+    }
+
+    writeJson(res, 405, { error: "Method not allowed." });
+    return;
+  }
+
+  if (pathname === "/api/aircraft/tais") {
+    if (method === "POST") {
+      if (TAIS_INGEST_TOKEN.length > 0) {
+        const token = getHeader(req, "x-tais-token").trim();
+        if (token !== TAIS_INGEST_TOKEN) {
+          writeJson(res, 401, { error: "Invalid TAIS ingest token." });
+          return;
+        }
+      }
+
+      try {
+        const payload = await readJsonBody(req, TAIS_MAX_JSON_BYTES);
+        latestAircraftTaisPayload = payload;
+        latestAircraftTaisUpdatedAtMs = inferUpdatedAtMs(payload);
+        updateTaisCacheFromPayload(payload);
+        writeJson(res, 202, {
+          ok: true,
+          storedAtMs: latestAircraftTaisUpdatedAtMs
+        });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "Invalid JSON payload.";
+        writeJson(res, 400, { error: message });
+      }
+      return;
+    }
+
+    if (method === "GET") {
+      if (latestAircraftTaisPayload !== null) {
+        writeJson(res, 200, latestAircraftTaisPayload);
+        return;
+      }
+
+      writeJson(res, 200, {
+        updatedAtMs: Date.now(),
+        source: "none",
+        records: []
+      });
+      return;
+    }
+
+    writeJson(res, 405, { error: "Method not allowed." });
+    return;
+  }
+
+  if (pathname === "/api/tfrs") {
+    if (method === "POST") {
+      if (TFRS_INGEST_TOKEN.length > 0) {
+        const token = getHeader(req, "x-tfrs-token").trim();
+        if (token !== TFRS_INGEST_TOKEN) {
+          writeJson(res, 401, { error: "Invalid TFR ingest token." });
+          return;
+        }
+      }
+
+      try {
+        const payload = await readJsonBody(req, TFRS_MAX_JSON_BYTES);
+        const normalized = normalizeTfrsIngestPayload(payload);
+        if (!normalized) {
+          writeJson(res, 400, { error: "Invalid TFR payload." });
+          return;
+        }
+
+        latestTfrsPayload = normalized;
+        latestTfrsUpdatedAtMs = normalized.updatedAtMs;
+        writeJson(res, 202, {
+          ok: true,
+          storedAtMs: normalized.updatedAtMs,
+          tfrs: normalized.tfrs.length
+        });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "Invalid JSON payload.";
+        writeJson(res, 400, { error: message });
+      }
+      return;
+    }
+
+    if (method === "GET") {
+      if (latestTfrsPayload) {
+        writeJson(res, 200, latestTfrsPayload);
+        return;
+      }
+
+      writeJson(res, 200, {
+        updatedAtMs: Date.now(),
+        source: "none",
+        artcc: "",
+        tracon: "",
+        mainIcao: MAIN_ICAO,
+        ids: [],
+        tfrs: []
+      } satisfies TfrsIngestPayload);
+      return;
+    }
+
+    writeJson(res, 405, { error: "Method not allowed." });
+    return;
+  }
+
   writeJson(res, 404, { error: "Not found." });
 });
 
@@ -728,9 +1478,15 @@ server.listen(PORT, HOST, () => {
   console.log(`POST target: http://${HOST}:${PORT}/api/wx/radar`);
   console.log(`QNH source ICAO main: ${MAIN_ICAO}`);
   console.log(`QNH worker POST target: ${QNH_POST_URL}`);
+  console.log(`Aircraft position ingest endpoint: http://${HOST}:${PORT}/api/aircraft/pos`);
+  console.log(`Aircraft TAIS ingest endpoint: http://${HOST}:${PORT}/api/aircraft/tais`);
+  console.log(`TFR ingest endpoint: http://${HOST}:${PORT}/api/tfrs`);
 
   void refreshAndPostQnh();
   setInterval(() => {
     void refreshAndPostQnh();
   }, QNH_REFRESH_MS);
+
+  startAdsbClient();
+  startTfrNotamsWorker();
 });
