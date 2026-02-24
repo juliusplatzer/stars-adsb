@@ -24,6 +24,7 @@ export interface DatablockDrawInput {
   leaderLengthPx?: number;
   leaderDirection?: DatablockLeaderDirection;
   timeMs?: number;
+  color?: string | null;
 }
 
 export interface DatablockDrawOptions {
@@ -43,7 +44,7 @@ const DEFAULT_FONT_BASE_PATH = "/public/font/sddCharFontSetASize1";
 const DEFAULT_LEADER_LENGTH_PX = 10;
 const DEFAULT_TEXT_OFFSET_PX = 3;
 const TIMESHARE_CYCLE_MS = 4_000;
-const TIMESHARE_ALTERNATE_MS = 500;
+const TIMESHARE_ALTERNATE_MS = 1_000;
 
 function toUpperTrimmed(value: string | null): string {
   return (value ?? "").trim().toUpperCase();
@@ -194,7 +195,7 @@ export class StarsDatablockRenderer {
     const expandedPrimary = `${altitude} ${groundspeed} ${cwt}`;
     const expandedAlternate =
       destinationIata.length > 0 && aircraftTypeIcao.length > 0
-        ? `${destinationIata} ${aircraftTypeIcao} ${cwt}`
+        ? `${destinationIata} ${aircraftTypeIcao}`
         : expandedPrimary;
     return {
       lines: [callsign, showAlternate ? expandedAlternate : expandedPrimary],
@@ -213,6 +214,7 @@ export class StarsDatablockRenderer {
   ): DatablockHitRegion {
     const drawLeader = options.drawLeader ?? true;
     const drawText = options.drawText ?? true;
+    const resolvedColor = input.color && input.color.trim().length > 0 ? input.color : this.color;
     const leaderLengthPx = input.leaderLengthPx ?? DEFAULT_LEADER_LENGTH_PX;
     const leaderDirection = input.leaderDirection ?? "N";
     const vector = directionToUnitVector(leaderDirection);
@@ -233,7 +235,7 @@ export class StarsDatablockRenderer {
 
     if (drawLeader) {
       ctx.save();
-      ctx.strokeStyle = this.color;
+      ctx.strokeStyle = resolvedColor;
       ctx.lineWidth = 1;
       ctx.beginPath();
       ctx.moveTo(Math.round(input.blipX), Math.round(input.blipY));
@@ -245,7 +247,7 @@ export class StarsDatablockRenderer {
     if (drawText) {
       ctx.save();
       for (let i = 0; i < lines.length; i += 1) {
-        drawTintedBitmapText(ctx, this.font, textLeft, blockTopY + i * lineHeight, lines[i], this.color);
+        drawTintedBitmapText(ctx, this.font, textLeft, blockTopY + i * lineHeight, lines[i], resolvedColor);
       }
       ctx.restore();
     }

@@ -33,7 +33,15 @@ export interface PrimaryTargetBlipDrawInput {
   y: number;
   trackDeg: number | null;
   tcpCode: string | null;
+  squawk?: string | null;
+  bodyShape?: PrimaryTargetBodyShape;
+  symbolColor?: string;
+  bodyOutlineOnly?: boolean;
+  bodyOutlineColor?: string;
+  bodyOutlineWidthPx?: number;
 }
+
+export type PrimaryTargetBodyShape = "circle" | "track-perpendicular-rectangle";
 
 export interface BlipColors {
   searchTargetBlue: string;
@@ -176,8 +184,187 @@ const BLIP_SYMBOL_CHARCODE: Record<Exclude<BlipCenterGlyphKind, "letter">, numbe
   star: 42
 };
 
-const VFR_BODY_SHORT_SIDE_PX = 6;
-const VFR_BODY_LONG_SIDE_PX = 16;
+const BLIP_PIXEL_CIRCLE_RADIUS_PX = 7;
+const BLIP_PIXEL_CORNER_CHAMFER_PX = 4;
+const BLIP_TRACK_RECT_WIDTH_PX = 19;
+const BLIP_TRACK_RECT_HEIGHT_PX = 6.5;
+
+const BLIP_PIXEL_BODY_OFFSETS: Array<{ dx: number; dy: number }> = (() => {
+  const offsets: Array<{ dx: number; dy: number }> = [];
+  for (let dy = -BLIP_PIXEL_CIRCLE_RADIUS_PX; dy <= BLIP_PIXEL_CIRCLE_RADIUS_PX; dy += 1) {
+    for (let dx = -BLIP_PIXEL_CIRCLE_RADIUS_PX; dx <= BLIP_PIXEL_CIRCLE_RADIUS_PX; dx += 1) {
+      const absX = Math.abs(dx);
+      const absY = Math.abs(dy);
+      const nearCorner =
+        absX > BLIP_PIXEL_CIRCLE_RADIUS_PX - BLIP_PIXEL_CORNER_CHAMFER_PX &&
+        absY > BLIP_PIXEL_CIRCLE_RADIUS_PX - BLIP_PIXEL_CORNER_CHAMFER_PX &&
+        absX + absY > 2 * BLIP_PIXEL_CIRCLE_RADIUS_PX - BLIP_PIXEL_CORNER_CHAMFER_PX;
+      if (nearCorner) {
+        continue;
+      }
+      offsets.push({ dx, dy });
+    }
+  }
+  return offsets;
+})();
+
+function drawPixelatedCircleBody(
+  ctx: CanvasRenderingContext2D,
+  centerX: number,
+  centerY: number,
+  color: string
+): void {
+  const cx = Math.round(centerX);
+  const cy = Math.round(centerY);
+  ctx.fillStyle = color;
+  for (let i = 0; i < BLIP_PIXEL_BODY_OFFSETS.length; i += 1) {
+    const offset = BLIP_PIXEL_BODY_OFFSETS[i];
+    ctx.fillRect(cx + offset.dx, cy + offset.dy, 1, 1);
+  }
+}
+
+function normalizeHeadingDeg(headingDeg: number): number {
+  const normalized = headingDeg % 360;
+  return normalized < 0 ? normalized + 360 : normalized;
+}
+
+function resolveTrackRectangleAngleRad(trackDeg: number | null): number {
+  if (trackDeg === null || !Number.isFinite(trackDeg)) {
+    return 0;
+  }
+  return toRadians(normalizeHeadingDeg(trackDeg));
+}
+
+function drawTrackPerpendicularRectangleBody(
+  ctx: CanvasRenderingContext2D,
+  centerX: number,
+  centerY: number,
+  trackDeg: number | null,
+  color: string
+): void {
+  const angleRad = resolveTrackRectangleAngleRad(trackDeg);
+  ctx.save();
+  ctx.translate(centerX, centerY);
+  ctx.rotate(angleRad);
+  ctx.fillStyle = color;
+  ctx.fillRect(
+    -BLIP_TRACK_RECT_WIDTH_PX / 2,
+    -BLIP_TRACK_RECT_HEIGHT_PX / 2,
+    BLIP_TRACK_RECT_WIDTH_PX,
+    BLIP_TRACK_RECT_HEIGHT_PX
+  );
+  ctx.restore();
+}
+
+function drawTrackPerpendicularRectangleOutline(
+  ctx: CanvasRenderingContext2D,
+  centerX: number,
+  centerY: number,
+  trackDeg: number | null,
+  color: string,
+  lineWidthPx: number
+): void {
+  const angleRad = resolveTrackRectangleAngleRad(trackDeg);
+  ctx.save();
+  ctx.translate(centerX, centerY);
+  ctx.rotate(angleRad);
+  ctx.strokeStyle = color;
+  ctx.lineWidth = lineWidthPx;
+  ctx.strokeRect(
+    -BLIP_TRACK_RECT_WIDTH_PX / 2,
+    -BLIP_TRACK_RECT_HEIGHT_PX / 2,
+    BLIP_TRACK_RECT_WIDTH_PX,
+    BLIP_TRACK_RECT_HEIGHT_PX
+  );
+  ctx.restore();
+}
+
+function drawPixelatedCircleOutline(
+  ctx: CanvasRenderingContext2D,
+  centerX: number,
+  centerY: number,
+  color: string,
+  lineWidthPx: number
+): void {
+  const radiusPx = Math.max(0.5, BLIP_PIXEL_CIRCLE_RADIUS_PX - lineWidthPx * 0.5);
+  ctx.save();
+  ctx.strokeStyle = color;
+  ctx.lineWidth = lineWidthPx;
+  ctx.beginPath();
+  ctx.arc(centerX, centerY, radiusPx, 0, Math.PI * 2);
+  ctx.stroke();
+  ctx.restore();
+}
+
+function resolvePrimaryTargetBodyShape(bodyShape: PrimaryTargetBodyShape | undefined): PrimaryTargetBodyShape {
+  return bodyShape === "track-perpendicular-rectangle" ? "track-perpendicular-rectangle" : "circle";
+}
+
+function drawPrimaryTargetBody(
+  ctx: CanvasRenderingContext2D,
+  input: Pick<PrimaryTargetBlipDrawInput, "x" | "y" | "trackDeg" | "bodyShape">,
+  bodyColor: string,
+  options?: {
+    outlineOnly?: boolean;
+    outlineColor?: string;
+    outlineWidthPx?: number;
+  }
+): void {
+  const shape = resolvePrimaryTargetBodyShape(input.bodyShape);
+  const outlineOnly = Boolean(options?.outlineOnly);
+  if (outlineOnly) {
+    const outlineColor = options?.outlineColor ?? bodyColor;
+    const requestedOutlineWidthPx = options?.outlineWidthPx;
+    const outlineWidthPx =
+      requestedOutlineWidthPx !== undefined && Number.isFinite(requestedOutlineWidthPx)
+        ? requestedOutlineWidthPx
+        : 0.5;
+    if (shape === "track-perpendicular-rectangle") {
+      drawTrackPerpendicularRectangleOutline(
+        ctx,
+        input.x,
+        input.y,
+        input.trackDeg,
+        outlineColor,
+        outlineWidthPx
+      );
+      return;
+    }
+    drawPixelatedCircleOutline(ctx, input.x, input.y, outlineColor, outlineWidthPx);
+    return;
+  }
+
+  if (shape === "track-perpendicular-rectangle") {
+    drawTrackPerpendicularRectangleBody(ctx, input.x, input.y, input.trackDeg, bodyColor);
+    return;
+  }
+  drawPixelatedCircleBody(ctx, input.x, input.y, bodyColor);
+}
+
+function getTrackRectangleHitRegion(input: Pick<PrimaryTargetBlipDrawInput, "x" | "y" | "trackDeg">): {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+} {
+  const angleRad = resolveTrackRectangleAngleRad(input.trackDeg);
+  const halfLong = BLIP_TRACK_RECT_WIDTH_PX / 2;
+  const halfShort = BLIP_TRACK_RECT_HEIGHT_PX / 2;
+  const absCos = Math.abs(Math.cos(angleRad));
+  const absSin = Math.abs(Math.sin(angleRad));
+  const extentX = absCos * halfLong + absSin * halfShort;
+  const extentY = absSin * halfLong + absCos * halfShort;
+  const minX = Math.floor(input.x - extentX);
+  const minY = Math.floor(input.y - extentY);
+  const maxX = Math.ceil(input.x + extentX);
+  const maxY = Math.ceil(input.y + extentY);
+  return {
+    x: minX,
+    y: minY,
+    width: maxX - minX + 1,
+    height: maxY - minY + 1
+  };
+}
 
 function drawLetterGlyph(
   ctx: CanvasRenderingContext2D,
@@ -196,8 +383,8 @@ function drawLetterGlyph(
     return;
   }
 
-  drawTintedGlyphFromAtlas(ctx, fonts.outline, outlineMetric, x, y, haloColor);
-  drawTintedGlyphFromAtlas(ctx, fonts.fill, fillMetric, x, y, fillColor);
+  drawTintedGlyphBoxCentered(ctx, fonts.outline, outlineMetric, x, y, haloColor);
+  drawTintedGlyphBoxCentered(ctx, fonts.fill, fillMetric, x, y, fillColor);
 }
 
 function drawSymbolGlyph(
@@ -337,43 +524,32 @@ export class RadarBlipRenderer {
     width: number;
     height: number;
   } {
-    const trackDeg = Number.isFinite(input.trackDeg) ? (input.trackDeg as number) : 0;
-    const angleRad = toRadians(trackDeg);
-    const halfLong = VFR_BODY_LONG_SIDE_PX * 0.5;
-    const halfShort = VFR_BODY_SHORT_SIDE_PX * 0.5;
-    const absCos = Math.abs(Math.cos(angleRad));
-    const absSin = Math.abs(Math.sin(angleRad));
-    const halfWidth = halfLong * absCos + halfShort * absSin;
-    const halfHeight = halfLong * absSin + halfShort * absCos;
-
+    const radius = BLIP_PIXEL_CIRCLE_RADIUS_PX;
     return {
-      x: Math.round(input.x - halfWidth),
-      y: Math.round(input.y - halfHeight),
-      width: Math.max(1, Math.round(halfWidth * 2)),
-      height: Math.max(1, Math.round(halfHeight * 2))
+      x: Math.round(input.x - radius),
+      y: Math.round(input.y - radius),
+      width: radius * 2 + 1,
+      height: radius * 2 + 1
     };
   }
 
-  getPrimaryTargetHitRegion(input: Pick<PrimaryTargetBlipDrawInput, "x" | "y" | "trackDeg">): {
+  getPrimaryTargetHitRegion(
+    input: Pick<PrimaryTargetBlipDrawInput, "x" | "y" | "trackDeg" | "squawk" | "bodyShape">
+  ): {
     x: number;
     y: number;
     width: number;
     height: number;
   } {
-    const trackDeg = Number.isFinite(input.trackDeg) ? (input.trackDeg as number) : 0;
-    const angleRad = toRadians(trackDeg);
-    const halfLong = VFR_BODY_LONG_SIDE_PX * 0.5;
-    const halfShort = VFR_BODY_SHORT_SIDE_PX * 0.5;
-    const absCos = Math.abs(Math.cos(angleRad));
-    const absSin = Math.abs(Math.sin(angleRad));
-    const halfWidth = halfLong * absCos + halfShort * absSin;
-    const halfHeight = halfLong * absSin + halfShort * absCos;
-
+    if (resolvePrimaryTargetBodyShape(input.bodyShape) === "track-perpendicular-rectangle") {
+      return getTrackRectangleHitRegion(input);
+    }
+    const radius = BLIP_PIXEL_CIRCLE_RADIUS_PX;
     return {
-      x: Math.round(input.x - halfWidth),
-      y: Math.round(input.y - halfHeight),
-      width: Math.max(1, Math.round(halfWidth * 2)),
-      height: Math.max(1, Math.round(halfHeight * 2))
+      x: Math.round(input.x - radius),
+      y: Math.round(input.y - radius),
+      width: radius * 2 + 1,
+      height: radius * 2 + 1
     };
   }
 
@@ -383,18 +559,7 @@ export class RadarBlipRenderer {
       return false;
     }
 
-    // Long side is perpendicular to track, short side parallel to track.
-    const trackDeg = Number.isFinite(input.trackDeg) ? (input.trackDeg as number) : 0;
-    const longAxisAngleRad = toRadians(trackDeg);
-    const halfLong = VFR_BODY_LONG_SIDE_PX * 0.5;
-    const halfShort = VFR_BODY_SHORT_SIDE_PX * 0.5;
-
-    ctx.save();
-    ctx.translate(input.x, input.y);
-    ctx.rotate(longAxisAngleRad);
-    ctx.fillStyle = this.searchTargetBlueColor;
-    ctx.fillRect(-halfLong, -halfShort, VFR_BODY_LONG_SIDE_PX, VFR_BODY_SHORT_SIDE_PX);
-    ctx.restore();
+    drawPixelatedCircleBody(ctx, input.x, input.y, this.searchTargetBlueColor);
 
     // Draw a green square with black halo at target center via outline atlas.
     const rendered = drawSymbolGlyphPinnedCenter(
@@ -427,17 +592,12 @@ export class RadarBlipRenderer {
   }
 
   drawPrimaryTarget(ctx: CanvasRenderingContext2D, input: PrimaryTargetBlipDrawInput): void {
-    const trackDeg = Number.isFinite(input.trackDeg) ? (input.trackDeg as number) : 0;
-    const longAxisAngleRad = toRadians(trackDeg);
-    const halfLong = VFR_BODY_LONG_SIDE_PX * 0.5;
-    const halfShort = VFR_BODY_SHORT_SIDE_PX * 0.5;
-
-    ctx.save();
-    ctx.translate(input.x, input.y);
-    ctx.rotate(longAxisAngleRad);
-    ctx.fillStyle = this.searchTargetBlueColor;
-    ctx.fillRect(-halfLong, -halfShort, VFR_BODY_LONG_SIDE_PX, VFR_BODY_SHORT_SIDE_PX);
-    ctx.restore();
+    const symbolColor = input.symbolColor ?? this.colors.green;
+    drawPrimaryTargetBody(ctx, input, this.searchTargetBlueColor, {
+      outlineOnly: input.bodyOutlineOnly,
+      outlineColor: input.bodyOutlineColor ?? this.searchTargetBlueColor,
+      outlineWidthPx: input.bodyOutlineWidthPx
+    });
 
     const centerGlyph = resolveGlyphFromTcpCode(input.tcpCode);
     if (centerGlyph.kind === "letter") {
@@ -447,7 +607,7 @@ export class RadarBlipRenderer {
         input.x,
         input.y,
         centerGlyph.letter ?? "?",
-        this.colors.green,
+        symbolColor,
         this.colors.black
       );
       return;
@@ -459,7 +619,7 @@ export class RadarBlipRenderer {
       input.x,
       input.y,
       BLIP_SYMBOL_CHARCODE.star,
-      this.colors.green,
+      symbolColor,
       this.colors.black
     );
     if (rendered) {
@@ -477,7 +637,7 @@ export class RadarBlipRenderer {
     ctx.lineTo(Math.round(input.x), Math.round(input.y + 3));
     ctx.stroke();
 
-    ctx.strokeStyle = this.colors.green;
+    ctx.strokeStyle = symbolColor;
     ctx.lineWidth = 1;
     ctx.beginPath();
     ctx.moveTo(Math.round(input.x - 3), Math.round(input.y));
@@ -489,27 +649,46 @@ export class RadarBlipRenderer {
   }
 
   draw(ctx: CanvasRenderingContext2D, input: BlipDrawInput): BlipResolvedCenterGlyph {
-    const radius = input.radiusPx ?? 8;
     const centerGlyph = resolveBlipCenterGlyph(input);
 
-    // Blue radar target body.
-    ctx.beginPath();
-    ctx.arc(input.x, input.y, radius, 0, Math.PI * 2);
-    ctx.fillStyle = this.searchTargetBlueColor;
-    ctx.fill();
+    drawPixelatedCircleBody(ctx, input.x, input.y, this.searchTargetBlueColor);
 
     const fill = shapeFillColor(input.glyphColor, this.colors);
     const stroke = this.colors.black;
 
     switch (centerGlyph.kind) {
       case "triangle":
-        drawSymbolGlyph(ctx, this.fonts, input.x, input.y, BLIP_SYMBOL_CHARCODE.triangle, fill, stroke);
+        drawSymbolGlyphPinnedCenter(
+          ctx,
+          this.fonts,
+          input.x,
+          input.y,
+          BLIP_SYMBOL_CHARCODE.triangle,
+          fill,
+          stroke
+        );
         break;
       case "square":
-        drawSymbolGlyph(ctx, this.fonts, input.x, input.y, BLIP_SYMBOL_CHARCODE.square, fill, stroke);
+        drawSymbolGlyphPinnedCenter(
+          ctx,
+          this.fonts,
+          input.x,
+          input.y,
+          BLIP_SYMBOL_CHARCODE.square,
+          fill,
+          stroke
+        );
         break;
       case "star":
-        drawSymbolGlyph(ctx, this.fonts, input.x, input.y, BLIP_SYMBOL_CHARCODE.star, fill, stroke);
+        drawSymbolGlyphPinnedCenter(
+          ctx,
+          this.fonts,
+          input.x,
+          input.y,
+          BLIP_SYMBOL_CHARCODE.star,
+          fill,
+          stroke
+        );
         break;
       case "letter":
         drawLetterGlyph(ctx, this.fonts, input.x, input.y, centerGlyph.letter ?? "?", fill, this.colors.black);
@@ -531,7 +710,7 @@ export class RadarBlipRenderer {
     }
 
     const dotRadiusPx = options.dotRadiusPx ?? 2;
-    const maxDots = Math.max(1, Math.min(5, options.maxDots ?? 5));
+    const maxDots = Math.max(1, Math.floor(options.maxDots ?? 5));
     // Backend history is oldest -> newest; color by recency so nearest trail point is HIST_BLUE_1.
     const ordered = [...positions].slice(-maxDots).reverse();
 
