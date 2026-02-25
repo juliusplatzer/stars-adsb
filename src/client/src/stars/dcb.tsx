@@ -121,6 +121,31 @@ export interface DcbAuxControlsInput {
   volValue?: string;
   volActive?: boolean;
   volTone?: DcbTileTone;
+  historyLabel?: string;
+  historyValue?: string;
+  historyActive?: boolean;
+  historyTone?: DcbTileTone;
+  historyRateLabel?: string;
+  historyRateValue?: string;
+  historyRateActive?: boolean;
+  historyRateTone?: DcbTileTone;
+  ptlLabel?: string;
+  ptlSubLabel?: string;
+  ptlValue?: string;
+  ptlActive?: boolean;
+  ptlTone?: DcbTileTone;
+  ptlOwnLabel?: string;
+  ptlOwnSubLabel?: string;
+  ptlOwnActive?: boolean;
+  ptlOwnTone?: DcbTileTone;
+  ptlAllLabel?: string;
+  ptlAllSubLabel?: string;
+  ptlAllActive?: boolean;
+  ptlAllTone?: DcbTileTone;
+  atpaLabel?: string;
+  atpaSubLabel?: string;
+  atpaActive?: boolean;
+  atpaTone?: DcbTileTone;
 }
 
 export interface DcbBriteMenuButton {
@@ -156,6 +181,46 @@ export interface DcbSsaFilterInput {
   expanded?: boolean;
   topRow?: DcbSsaFilterMenuButton[];
   bottomRow?: DcbSsaFilterMenuButton[];
+  doneActive?: boolean;
+  doneTone?: DcbTileTone;
+  doneTextColor?: string;
+}
+
+export interface DcbSiteMenuButton {
+  siteId?: string;
+  top: string;
+  bottom: string;
+  active?: boolean;
+  tone?: DcbTileTone;
+  textColor?: string;
+}
+
+export interface DcbSiteMenuInput {
+  x: number;
+  y: number;
+  expanded?: boolean;
+  buttons?: DcbSiteMenuButton[];
+  doneActive?: boolean;
+  doneTone?: DcbTileTone;
+  doneTextColor?: string;
+}
+
+export interface DcbAtpaMenuButton {
+  control?: Extract<
+    DcbAtpaControlHit,
+    "atpa-mileage" | "atpa-intrail" | "atpa-alert-cones" | "atpa-monitor-cones"
+  >;
+  lines: string[];
+  active?: boolean;
+  tone?: DcbTileTone;
+  textColor?: string;
+}
+
+export interface DcbAtpaMenuInput {
+  x: number;
+  y: number;
+  expanded?: boolean;
+  buttons?: DcbAtpaMenuButton[];
   doneActive?: boolean;
   doneTone?: DcbTileTone;
   doneTextColor?: string;
@@ -198,6 +263,8 @@ const WX_BUTTON_GAP_PX = MAPS_BUTTON_GAP_PX;
 const BRITE_MENU_COLUMNS = 9;
 const BRITE_DCB_COLUMN_INDEX = 0;
 const BRITE_MPA_COLUMN_INDEX = 1;
+const BRITE_FDB_COLUMN_INDEX = 2;
+const BRITE_POS_COLUMN_INDEX = 3;
 const BRITE_LST_COLUMN_INDEX = 2;
 const BRITE_TLS_COLUMN_INDEX = 4;
 const BRITE_RR_COLUMN_INDEX = 5;
@@ -214,7 +281,13 @@ export type DcbRangeRingControlHit =
   | "place-rr"
   | "rr-cntr";
 export type DcbLeaderControlHit = "ldr-dir" | "ldr-length";
-export type DcbAuxControlHit = "shift" | "vol";
+export type DcbAuxControlHit =
+  | "shift"
+  | "vol"
+  | "history"
+  | "ptl"
+  | "ptl-own"
+  | "atpa-toggle";
 export type DcbBriteControlHit =
   | "brite-toggle"
   | "brite-menu"
@@ -222,6 +295,9 @@ export type DcbBriteControlHit =
   | "brite-dcb"
   | "brite-rr"
   | "brite-mpa"
+  | "brite-fdb"
+  | "brite-pos"
+  | "brite-mpb"
   | "brite-cmp"
   | "brite-lst"
   | "brite-tls"
@@ -242,9 +318,27 @@ export type DcbSsaFilterControlHit =
   | "ssa-filter-toggle"
   | "ssa-filter-menu"
   | "ssa-filter-done"
+  | "ssa-filter-status"
+  | "ssa-filter-radar"
   | "ssa-filter-altstg"
+  | "ssa-filter-alt-fil"
   | "ssa-filter-time"
   | "ssa-filter-wx";
+
+export type DcbSiteControlHit =
+  | "site-toggle"
+  | "site-menu"
+  | "site-done"
+  | "site-select";
+
+export type DcbAtpaControlHit =
+  | "atpa-toggle"
+  | "atpa-menu"
+  | "atpa-done"
+  | "atpa-mileage"
+  | "atpa-intrail"
+  | "atpa-alert-cones"
+  | "atpa-monitor-cones";
 
 interface DcbMapTileRect {
   x: number;
@@ -284,6 +378,15 @@ interface DcbMapsMenuTile extends DcbMapTileRect {
 
 interface DcbSsaFilterMenuTile extends DcbMapTileRect {
   control: DcbSsaFilterControlHit;
+}
+
+interface DcbSiteMenuTile extends DcbMapTileRect {
+  control: DcbSiteControlHit;
+  siteId: string | null;
+}
+
+interface DcbAtpaMenuTile extends DcbMapTileRect {
+  control: DcbAtpaControlHit;
 }
 
 const DEFAULT_DCB_COLORS: DcbColors = {
@@ -625,6 +728,34 @@ export class StarsDcbRenderer {
           x: originX + MAPS_BIG_BUTTON_WIDTH + MAPS_BUTTON_GAP_PX,
           y: originY,
           width: MAPS_BIG_BUTTON_WIDTH,
+          height: MAPS_SMALL_BUTTON_HEIGHT,
+          control: "history"
+        },
+        {
+          x: originX + (MAPS_BIG_BUTTON_WIDTH + MAPS_BUTTON_GAP_PX) * 2,
+          y: originY,
+          width: MAPS_BIG_BUTTON_WIDTH,
+          height: MAPS_BIG_BUTTON_HEIGHT,
+          control: "ptl"
+        },
+        {
+          x: originX + (MAPS_BIG_BUTTON_WIDTH + MAPS_BUTTON_GAP_PX) * 3,
+          y: originY,
+          width: MAPS_BIG_BUTTON_WIDTH,
+          height: MAPS_SMALL_BUTTON_HEIGHT,
+          control: "ptl-own"
+        },
+        {
+          x: originX + (MAPS_BIG_BUTTON_WIDTH + MAPS_BUTTON_GAP_PX) * 4,
+          y: originY,
+          width: MAPS_BIG_BUTTON_WIDTH,
+          height: MAPS_BIG_BUTTON_HEIGHT,
+          control: "atpa-toggle"
+        },
+        {
+          x: originX + (MAPS_BIG_BUTTON_WIDTH + MAPS_BUTTON_GAP_PX) * 5,
+          y: originY,
+          width: MAPS_BIG_BUTTON_WIDTH,
           height: MAPS_BIG_BUTTON_HEIGHT,
           control: "shift"
         }
@@ -680,6 +811,10 @@ export class StarsDcbRenderer {
             ? "brite-rr"
             : i === BRITE_MPA_COLUMN_INDEX
               ? "brite-mpa"
+            : i === BRITE_FDB_COLUMN_INDEX
+              ? "brite-fdb"
+            : i === BRITE_POS_COLUMN_INDEX
+              ? "brite-pos"
               : i === BRITE_HST_COLUMN_INDEX
                 ? "brite-hst"
                 : i === BRITE_WXC_COLUMN_INDEX
@@ -694,6 +829,8 @@ export class StarsDcbRenderer {
         control:
           i === BRITE_MENU_COLUMNS - 1
             ? "brite-done"
+            : i === BRITE_MPA_COLUMN_INDEX
+              ? "brite-mpb"
             : i === BRITE_CMP_COLUMN_INDEX
               ? "brite-cmp"
             : i === BRITE_PRI_COLUMN_INDEX
@@ -823,8 +960,17 @@ export class StarsDcbRenderer {
     if (normalized === "TIME") {
       return "ssa-filter-time";
     }
+    if (normalized === "STATUS") {
+      return "ssa-filter-status";
+    }
+    if (normalized === "RADAR") {
+      return "ssa-filter-radar";
+    }
     if (normalized === "ALTSTG") {
       return "ssa-filter-altstg";
+    }
+    if (normalized === "ALT FIL") {
+      return "ssa-filter-alt-fil";
     }
     if (normalized === "WX") {
       return "ssa-filter-wx";
@@ -881,8 +1027,15 @@ export class StarsDcbRenderer {
         x: toggleX,
         y: toggleY,
         width: MAPS_BIG_BUTTON_WIDTH,
-        height: MAPS_BIG_BUTTON_HEIGHT,
+        height: MAPS_SMALL_BUTTON_HEIGHT,
         control: "ssa-filter-toggle"
+      },
+      {
+        x: toggleX,
+        y: toggleY + MAPS_SMALL_BUTTON_HEIGHT + MAPS_BUTTON_GAP_PX,
+        width: MAPS_BIG_BUTTON_WIDTH,
+        height: MAPS_SMALL_BUTTON_HEIGHT,
+        control: "ssa-filter-menu"
       }
     ];
 
@@ -929,6 +1082,184 @@ export class StarsDcbRenderer {
         control: bottom
       });
     }
+
+    return tiles;
+  }
+
+  private getSiteMenuMetrics(input: DcbSiteMenuInput): {
+    originX: number;
+    originY: number;
+    toggleX: number;
+    toggleY: number;
+    buttonsCount: number;
+    menuOriginX: number;
+    menuWidth: number;
+    menuHeight: number;
+    doneX: number;
+  } {
+    const originX = Math.round(input.x);
+    const originY = Math.round(input.y);
+    const toggleX =
+      originX + MAPS_BIG_BUTTON_WIDTH * 2 + MAPS_BUTTON_GAP_PX * 2;
+    const toggleY = originY;
+    const buttonsCount = Math.max(0, (input.buttons ?? []).length);
+    const menuColumns = buttonsCount + 1; // include DONE
+    const menuWidth =
+      menuColumns <= 0
+        ? 0
+        : menuColumns * MAPS_BIG_BUTTON_WIDTH + (menuColumns - 1) * MAPS_BUTTON_GAP_PX;
+    const menuHeight = MAPS_BIG_BUTTON_HEIGHT;
+    const menuOriginX = toggleX - MAPS_BUTTON_GAP_PX - menuWidth;
+    const doneX =
+      menuOriginX +
+      (buttonsCount <= 0
+        ? 0
+        : buttonsCount * MAPS_BIG_BUTTON_WIDTH + buttonsCount * MAPS_BUTTON_GAP_PX);
+
+    return {
+      originX,
+      originY,
+      toggleX,
+      toggleY,
+      buttonsCount,
+      menuOriginX,
+      menuWidth,
+      menuHeight,
+      doneX
+    };
+  }
+
+  private getSiteMenuTiles(input: DcbSiteMenuInput): DcbSiteMenuTile[] {
+    const { originY, toggleX, toggleY, buttonsCount, menuOriginX } = this.getSiteMenuMetrics(input);
+    const tiles: DcbSiteMenuTile[] = [
+      {
+        x: toggleX,
+        y: toggleY,
+        width: MAPS_BIG_BUTTON_WIDTH,
+        height: MAPS_BIG_BUTTON_HEIGHT,
+        control: "site-toggle",
+        siteId: null
+      }
+    ];
+
+    if (!input.expanded) {
+      return tiles;
+    }
+
+    const buttons = input.buttons ?? [];
+    for (let i = 0; i < buttonsCount; i += 1) {
+      const buttonX = menuOriginX + i * (MAPS_BIG_BUTTON_WIDTH + MAPS_BUTTON_GAP_PX);
+      const button = buttons[i] ?? null;
+      tiles.push({
+        x: buttonX,
+        y: originY,
+        width: MAPS_BIG_BUTTON_WIDTH,
+        height: MAPS_BIG_BUTTON_HEIGHT,
+        control: "site-select",
+        siteId: typeof button?.siteId === "string" ? button.siteId : null
+      });
+    }
+
+    const doneX =
+      menuOriginX +
+      (buttonsCount <= 0
+        ? 0
+        : buttonsCount * MAPS_BIG_BUTTON_WIDTH + buttonsCount * MAPS_BUTTON_GAP_PX);
+    tiles.push({
+      x: doneX,
+      y: originY,
+      width: MAPS_BIG_BUTTON_WIDTH,
+      height: MAPS_BIG_BUTTON_HEIGHT,
+      control: "site-done",
+      siteId: null
+    });
+
+    return tiles;
+  }
+
+  private getAtpaMenuMetrics(input: DcbAtpaMenuInput): {
+    originX: number;
+    originY: number;
+    toggleX: number;
+    toggleY: number;
+    buttonsCount: number;
+    menuOriginX: number;
+    menuWidth: number;
+    menuHeight: number;
+    doneX: number;
+  } {
+    const originX = Math.round(input.x);
+    const originY = Math.round(input.y);
+    const toggleX = originX + MAPS_BIG_BUTTON_WIDTH * 4 + MAPS_BUTTON_GAP_PX * 4;
+    const toggleY = originY;
+    const buttonsCount = Math.max(0, (input.buttons ?? []).length);
+    const menuColumns = buttonsCount + 1; // include DONE
+    const menuWidth =
+      menuColumns <= 0
+        ? 0
+        : menuColumns * MAPS_BIG_BUTTON_WIDTH + (menuColumns - 1) * MAPS_BUTTON_GAP_PX;
+    const menuHeight = MAPS_BIG_BUTTON_HEIGHT;
+    const menuOriginX = toggleX + MAPS_BIG_BUTTON_WIDTH + MAPS_BUTTON_GAP_PX;
+    const doneX =
+      menuOriginX +
+      (buttonsCount <= 0
+        ? 0
+        : buttonsCount * MAPS_BIG_BUTTON_WIDTH + buttonsCount * MAPS_BUTTON_GAP_PX);
+
+    return {
+      originX,
+      originY,
+      toggleX,
+      toggleY,
+      buttonsCount,
+      menuOriginX,
+      menuWidth,
+      menuHeight,
+      doneX
+    };
+  }
+
+  private getAtpaMenuTiles(input: DcbAtpaMenuInput): DcbAtpaMenuTile[] {
+    const { originY, toggleX, toggleY, buttonsCount, menuOriginX } = this.getAtpaMenuMetrics(input);
+    const tiles: DcbAtpaMenuTile[] = [
+      {
+        x: toggleX,
+        y: toggleY,
+        width: MAPS_BIG_BUTTON_WIDTH,
+        height: MAPS_BIG_BUTTON_HEIGHT,
+        control: "atpa-toggle"
+      }
+    ];
+
+    if (!input.expanded) {
+      return tiles;
+    }
+
+    const buttons = input.buttons ?? [];
+    for (let i = 0; i < buttonsCount; i += 1) {
+      const buttonX = menuOriginX + i * (MAPS_BIG_BUTTON_WIDTH + MAPS_BUTTON_GAP_PX);
+      const button = buttons[i];
+      tiles.push({
+        x: buttonX,
+        y: originY,
+        width: MAPS_BIG_BUTTON_WIDTH,
+        height: MAPS_BIG_BUTTON_HEIGHT,
+        control: button?.control ?? "atpa-menu"
+      });
+    }
+
+    const doneX =
+      menuOriginX +
+      (buttonsCount <= 0
+        ? 0
+        : buttonsCount * MAPS_BIG_BUTTON_WIDTH + buttonsCount * MAPS_BUTTON_GAP_PX);
+    tiles.push({
+      x: doneX,
+      y: originY,
+      width: MAPS_BIG_BUTTON_WIDTH,
+      height: MAPS_BIG_BUTTON_HEIGHT,
+      control: "atpa-done"
+    });
 
     return tiles;
   }
@@ -1074,6 +1405,74 @@ export class StarsDcbRenderer {
     };
     if (pointInsideRect(x, y, menuRect)) {
       return "ssa-filter-menu";
+    }
+
+    return null;
+  }
+
+  hitTestSiteMenu(
+    input: DcbSiteMenuInput,
+    x: number,
+    y: number
+  ): { control: DcbSiteControlHit; siteId: string | null } | null {
+    const tiles = this.getSiteMenuTiles(input);
+    for (const tile of tiles) {
+      if (!pointInsideRect(x, y, tile)) {
+        continue;
+      }
+      return { control: tile.control, siteId: tile.siteId };
+    }
+
+    if (!input.expanded) {
+      return null;
+    }
+
+    const metrics = this.getSiteMenuMetrics(input);
+    if (metrics.menuWidth <= 0) {
+      return null;
+    }
+    const menuRect: DcbMapTileRect = {
+      x: metrics.menuOriginX,
+      y: metrics.originY,
+      width: metrics.menuWidth,
+      height: metrics.menuHeight
+    };
+    if (pointInsideRect(x, y, menuRect)) {
+      return { control: "site-menu", siteId: null };
+    }
+
+    return null;
+  }
+
+  hitTestAtpaMenu(
+    input: DcbAtpaMenuInput,
+    x: number,
+    y: number
+  ): DcbAtpaControlHit | null {
+    const tiles = this.getAtpaMenuTiles(input);
+    for (const tile of tiles) {
+      if (!pointInsideRect(x, y, tile)) {
+        continue;
+      }
+      return tile.control;
+    }
+
+    if (!input.expanded) {
+      return null;
+    }
+
+    const metrics = this.getAtpaMenuMetrics(input);
+    if (metrics.menuWidth <= 0) {
+      return null;
+    }
+    const menuRect: DcbMapTileRect = {
+      x: metrics.menuOriginX,
+      y: metrics.originY,
+      width: metrics.menuWidth,
+      height: metrics.menuHeight
+    };
+    if (pointInsideRect(x, y, menuRect)) {
+      return "atpa-menu";
     }
 
     return null;
@@ -1379,7 +1778,11 @@ export class StarsDcbRenderer {
 
     if (secondPage) {
       const volX = originX;
-      const shiftPageX = originX + MAPS_BIG_BUTTON_WIDTH + buttonGap;
+      const historyX = originX + MAPS_BIG_BUTTON_WIDTH + buttonGap;
+      const ptlX = historyX + MAPS_BIG_BUTTON_WIDTH + buttonGap;
+      const ptlModeX = ptlX + MAPS_BIG_BUTTON_WIDTH + buttonGap;
+      const atpaX = ptlModeX + MAPS_BIG_BUTTON_WIDTH + buttonGap;
+      const shiftPageX = atpaX + MAPS_BIG_BUTTON_WIDTH + buttonGap;
 
       drawButtonFrame(
         ctx,
@@ -1399,6 +1802,132 @@ export class StarsDcbRenderer {
         MAPS_BIG_BUTTON_WIDTH,
         MAPS_BIG_BUTTON_HEIGHT,
         [input.volLabel ?? "VOL", input.volValue ?? ""],
+        this.palette.text
+      );
+
+      drawButtonFrame(
+        ctx,
+        historyX,
+        originY,
+        MAPS_SMALL_BUTTON_WIDTH,
+        MAPS_SMALL_BUTTON_HEIGHT,
+        resolveButtonFillColor(this.palette, input.historyActive, input.historyTone),
+        this.palette,
+        Boolean(input.historyActive)
+      );
+      drawCenteredLines(
+        ctx,
+        this.font,
+        historyX,
+        originY,
+        MAPS_SMALL_BUTTON_WIDTH,
+        MAPS_SMALL_BUTTON_HEIGHT,
+        [input.historyLabel ?? "HISTORY", input.historyValue ?? "5"],
+        this.palette.text
+      );
+
+      drawButtonFrame(
+        ctx,
+        historyX,
+        originY + MAPS_SMALL_BUTTON_HEIGHT + MAPS_BUTTON_GAP_PX,
+        MAPS_SMALL_BUTTON_WIDTH,
+        MAPS_SMALL_BUTTON_HEIGHT,
+        resolveButtonFillColor(this.palette, input.historyRateActive, input.historyRateTone),
+        this.palette,
+        Boolean(input.historyRateActive)
+      );
+      drawCenteredLines(
+        ctx,
+        this.font,
+        historyX,
+        originY + MAPS_SMALL_BUTTON_HEIGHT + MAPS_BUTTON_GAP_PX,
+        MAPS_SMALL_BUTTON_WIDTH,
+        MAPS_SMALL_BUTTON_HEIGHT,
+        [input.historyRateLabel ?? "H_RATE", input.historyRateValue ?? "4.5"],
+        this.palette.text
+      );
+
+      drawButtonFrame(
+        ctx,
+        ptlX,
+        originY,
+        MAPS_BIG_BUTTON_WIDTH,
+        MAPS_BIG_BUTTON_HEIGHT,
+        resolveButtonFillColor(this.palette, input.ptlActive, input.ptlTone),
+        this.palette,
+        Boolean(input.ptlActive)
+      );
+      drawCenteredLines(
+        ctx,
+        this.font,
+        ptlX,
+        originY,
+        MAPS_BIG_BUTTON_WIDTH,
+        MAPS_BIG_BUTTON_HEIGHT,
+        [input.ptlLabel ?? "PTL", input.ptlSubLabel ?? "LNTH", input.ptlValue ?? "1.0"],
+        this.palette.text
+      );
+
+      drawButtonFrame(
+        ctx,
+        ptlModeX,
+        originY,
+        MAPS_SMALL_BUTTON_WIDTH,
+        MAPS_SMALL_BUTTON_HEIGHT,
+        resolveButtonFillColor(this.palette, input.ptlOwnActive, input.ptlOwnTone),
+        this.palette,
+        Boolean(input.ptlOwnActive)
+      );
+      drawCenteredLines(
+        ctx,
+        this.font,
+        ptlModeX,
+        originY,
+        MAPS_SMALL_BUTTON_WIDTH,
+        MAPS_SMALL_BUTTON_HEIGHT,
+        [`${input.ptlOwnLabel ?? "PTL"} ${input.ptlOwnSubLabel ?? "OWN"}`],
+        this.palette.text
+      );
+
+      drawButtonFrame(
+        ctx,
+        ptlModeX,
+        originY + MAPS_SMALL_BUTTON_HEIGHT + MAPS_BUTTON_GAP_PX,
+        MAPS_SMALL_BUTTON_WIDTH,
+        MAPS_SMALL_BUTTON_HEIGHT,
+        resolveButtonFillColor(this.palette, input.ptlAllActive, input.ptlAllTone),
+        this.palette,
+        Boolean(input.ptlAllActive)
+      );
+      drawCenteredLines(
+        ctx,
+        this.font,
+        ptlModeX,
+        originY + MAPS_SMALL_BUTTON_HEIGHT + MAPS_BUTTON_GAP_PX,
+        MAPS_SMALL_BUTTON_WIDTH,
+        MAPS_SMALL_BUTTON_HEIGHT,
+        [`${input.ptlAllLabel ?? "PTL"} ${input.ptlAllSubLabel ?? "ALL"}`],
+        this.palette.text
+      );
+
+      drawButtonFrame(
+        ctx,
+        atpaX,
+        originY,
+        MAPS_BIG_BUTTON_WIDTH,
+        MAPS_BIG_BUTTON_HEIGHT,
+        resolveButtonFillColor(this.palette, input.atpaActive, input.atpaTone),
+        this.palette,
+        Boolean(input.atpaActive)
+      );
+      drawCenteredLines(
+        ctx,
+        this.font,
+        atpaX,
+        originY,
+        MAPS_BIG_BUTTON_WIDTH,
+        MAPS_BIG_BUTTON_HEIGHT,
+        [input.atpaLabel ?? "TPA/", input.atpaSubLabel ?? "ATPA"],
         this.palette.text
       );
 
@@ -1831,5 +2360,139 @@ export class StarsDcbRenderer {
         bottom.textColor ?? this.palette.text
       );
     }
+  }
+
+  drawSiteMenu(ctx: CanvasRenderingContext2D, input: DcbSiteMenuInput): void {
+    if (!input.expanded) {
+      return;
+    }
+
+    const { originY, buttonsCount, menuOriginX, menuWidth, menuHeight, doneX } =
+      this.getSiteMenuMetrics(input);
+    if (menuWidth <= 0) {
+      return;
+    }
+
+    const buttons = (input.buttons ?? []).slice(0, buttonsCount);
+
+    // Keep the expanded submenu readable by masking underlying controls.
+    ctx.save();
+    ctx.fillStyle = colors.BLACK;
+    ctx.fillRect(menuOriginX, originY, menuWidth, menuHeight);
+    ctx.restore();
+
+    for (let i = 0; i < buttonsCount; i += 1) {
+      const buttonX = menuOriginX + i * (MAPS_BIG_BUTTON_WIDTH + MAPS_BUTTON_GAP_PX);
+      const button = buttons[i] ?? { top: "", bottom: "", active: false, tone: "normal" };
+
+      drawButtonFrame(
+        ctx,
+        buttonX,
+        originY,
+        MAPS_BIG_BUTTON_WIDTH,
+        MAPS_BIG_BUTTON_HEIGHT,
+        resolveButtonFillColor(this.palette, button.active, button.tone),
+        this.palette,
+        Boolean(button.active)
+      );
+      drawCenteredLines(
+        ctx,
+        this.font,
+        buttonX,
+        originY,
+        MAPS_BIG_BUTTON_WIDTH,
+        MAPS_BIG_BUTTON_HEIGHT,
+        [button.top, button.bottom],
+        button.textColor ?? this.palette.text
+      );
+    }
+
+    drawButtonFrame(
+      ctx,
+      doneX,
+      originY,
+      MAPS_BIG_BUTTON_WIDTH,
+      MAPS_BIG_BUTTON_HEIGHT,
+      resolveButtonFillColor(this.palette, input.doneActive, input.doneTone),
+      this.palette,
+      Boolean(input.doneActive)
+    );
+    drawCenteredLines(
+      ctx,
+      this.font,
+      doneX,
+      originY,
+      MAPS_BIG_BUTTON_WIDTH,
+      MAPS_BIG_BUTTON_HEIGHT,
+      ["DONE"],
+      input.doneTextColor ?? this.palette.text
+    );
+  }
+
+  drawAtpaMenu(ctx: CanvasRenderingContext2D, input: DcbAtpaMenuInput): void {
+    if (!input.expanded) {
+      return;
+    }
+
+    const { originY, buttonsCount, menuOriginX, menuWidth, menuHeight, doneX } =
+      this.getAtpaMenuMetrics(input);
+    if (menuWidth <= 0) {
+      return;
+    }
+
+    const buttons = (input.buttons ?? []).slice(0, buttonsCount);
+
+    // Keep the expanded submenu readable by masking underlying controls.
+    ctx.save();
+    ctx.fillStyle = colors.BLACK;
+    ctx.fillRect(menuOriginX, originY, menuWidth, menuHeight);
+    ctx.restore();
+
+    for (let i = 0; i < buttonsCount; i += 1) {
+      const buttonX = menuOriginX + i * (MAPS_BIG_BUTTON_WIDTH + MAPS_BUTTON_GAP_PX);
+      const button = buttons[i] ?? { lines: [], active: false, tone: "normal" };
+
+      drawButtonFrame(
+        ctx,
+        buttonX,
+        originY,
+        MAPS_BIG_BUTTON_WIDTH,
+        MAPS_BIG_BUTTON_HEIGHT,
+        resolveButtonFillColor(this.palette, button.active, button.tone),
+        this.palette,
+        Boolean(button.active)
+      );
+      drawCenteredLines(
+        ctx,
+        this.font,
+        buttonX,
+        originY,
+        MAPS_BIG_BUTTON_WIDTH,
+        MAPS_BIG_BUTTON_HEIGHT,
+        button.lines,
+        button.textColor ?? this.palette.text
+      );
+    }
+
+    drawButtonFrame(
+      ctx,
+      doneX,
+      originY,
+      MAPS_BIG_BUTTON_WIDTH,
+      MAPS_BIG_BUTTON_HEIGHT,
+      resolveButtonFillColor(this.palette, input.doneActive, input.doneTone),
+      this.palette,
+      Boolean(input.doneActive)
+    );
+    drawCenteredLines(
+      ctx,
+      this.font,
+      doneX,
+      originY,
+      MAPS_BIG_BUTTON_WIDTH,
+      MAPS_BIG_BUTTON_HEIGHT,
+      ["DONE"],
+      input.doneTextColor ?? this.palette.text
+    );
   }
 }
